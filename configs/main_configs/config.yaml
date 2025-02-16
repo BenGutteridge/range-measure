@@ -1,0 +1,9 @@
+defaults:
+  - _self_
+  - dataset: ??
+  - architecture: ??
+  - scheduler: ??
+  - optim: ??
+  - server: ??
+  - override hydra/job_logging: colorlog
+  - override hydra/hydra_logging: colorlog
