@@ -1,8 +1,10 @@
 # On Measuring Long-Range Interactions in Graph Neural Networks
 
-Repo containing experiments from the under-review paper "On Measuring Long-Range Interactions in Graph Neural Networks", investigating long-range benchmark tasks and architectures.
+Repo containing experiments from the paper "On Measuring Long-Range Interactions in Graph Neural Networks", accepted to ICML 2025.
 
-Code from [1] and [2].
+Code adapted from from [1] and [2].
+
+**N.B. this repo is a *work-in-progress*, updated code coming soon.**
 
 ### Setup
 ```bash
