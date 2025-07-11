@@ -4,6 +4,7 @@ import sys
 import tqdm
 from typing import Tuple, Any, Callable, Optional
 from torch_geometric.loader import DataLoader
+import torch_geometric as pyg
 from torch import Tensor
 import numpy as np
 import matplotlib.pyplot as plt
@@ -19,8 +20,13 @@ from helpers.dataset_classes.dataset import DatasetBySplit
 from longrange.task_preprocessing import (
     syn_task_preprocessing,
     syn_topology_preprocessing,
+    add_distance_attrs,
 )
 from longrange.range import compute_range, DiffModel
+import os
+from os.path import join
+import pandas as pd
+import json
 
 
 class Experiment(object):
@@ -35,6 +41,14 @@ class Experiment(object):
             self.__setattr__(arg, value_arg)
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.sample_range = args.sample_range = any(
+            [
+                self.in_channel_sample_prob != 1.0,
+                self.in_node_sample_prob != 1.0,
+                self.out_channel_sample_prob != 1.0,
+                self.out_node_sample_prob != 1.0,
+            ]
+        ) # if all sampling params are 1.0 (the default) then we don't sample
         set_seed(seed=self.seed)
         self.timestamp = time.strftime("%Y-%m-%d_%H%M")
         if self.wandb:
@@ -59,18 +73,28 @@ class Experiment(object):
 
         # Synthetic LR task
         self.pre_transform = self.generate_synth_topology()
-        self.transform = self.generate_synth_task()
-        self.dir_name = (
-            (
+        
+        if self.dataset.is_lr_synthetic():
+            self.transform = self.generate_synth_task()
+            self.dir_name = (
                 "LR-SYNTH"
                 f"_dist={self.distance_fn}"
                 f"_int={self.interaction_fn}"
-                f"_alpha={self.alpha}"
-            )
-            + (f"_track_range" if self.track_range else "")
-            if self.lr_exp
-            else None
-        )
+            ) + (f"_track_range" if self.track_range else "")
+        else:
+            self.transform = None
+            self.dir_name = None
+
+        if self.dataset.is_heterophilic() or self.track_range:
+
+            def add_res_spd_dists(data):
+                data = pyg.transforms.ToUndirected()(data)
+                data = add_distance_attrs(data, "resistance")
+                data = add_distance_attrs(data, "spd")
+                return data
+
+            self.pre_transform = add_res_spd_dists
+            self.dir_name = "res_spd"
 
         # Asserts
         self.dataset.asserts(args)
@@ -84,7 +108,9 @@ class Experiment(object):
             dir_name=self.dir_name,
             subset=self.subset,
             num_graphs=self.num_graphs,
+            virtual_node=self.virtual_node,
         )
+
         if self.metric_type.is_multilabel():
             dataset.data.y = dataset.data.y.to(dtype=torch.float)
 
@@ -111,6 +137,7 @@ class Experiment(object):
             dec_num_layers=self.dec_num_layers,
             pos_enc=self.pos_enc,
             dataset_encoders=self.dataset.get_dataset_encoders(),
+            virtual_node=self.virtual_node,
         )
 
         metrics_list = []
@@ -181,6 +208,30 @@ class Experiment(object):
                 f"\nval={round(metrics_mean[1], self.decimal)}+-{round(metrics_std[1], self.decimal)},"
                 f"\ntest={round(metrics_mean[2], self.decimal)}+-{round(metrics_std[2], self.decimal)}"
             )
+
+            run_scores_path = join(
+                "range_results",
+                str(self.dataset).replace("Dataset.", ""),
+                str(self.model_type).replace("ModelType.", "") + ".json",
+            )
+            # Convert gnn_args and metrics_mean and _spd to a dict
+            run_dict = {k: str(v) for k, v in gnn_args._asdict().items()} | {
+                "train": metrics_mean[0],
+                "val": metrics_mean[1],
+                "test": metrics_mean[2],
+                "train_std": metrics_std[0],
+                "val_std": metrics_std[1],
+                "test_std": metrics_std[2],
+            }
+            with open(run_scores_path, "a") as jsonfile:
+                json.dump(run_dict, jsonfile, indent=2)
+            logger.info(f"Saved run scores to {run_scores_path}")
+            loss_histories_path = run_scores_path.replace(
+                ".json", "_loss_histories.json"
+            )
+            with open(loss_histories_path, "a") as jsonfile:
+                json.dump(loss_histories, jsonfile, indent=2)
+            logger.info(f"Saved run scores to {loss_histories_path}")
 
         # Plot loss curves if training was performed
         # if not self.evaluate_only:
@@ -312,26 +363,26 @@ class Experiment(object):
             "train_range_spd_norm": [],
         }
 
-        # task jacobian:
-        if self.track_range:
+        # Task jacobian:
+        if self.track_range and self.dataset.is_lr_synthetic():
             (
                 train_task_range_res,
                 train_task_range_spd,
                 train_task_range_res_norm,
                 train_task_range_spd_norm,
-            ) = self.compute_task_range(loader=train_loader)
+            ) = self.compute_task_range(loader=train_loader_range)
             (
                 val_task_range_res,
                 val_task_range_spd,
                 val_task_range_res_norm,
                 val_task_range_spd_norm,
-            ) = self.compute_task_range(loader=val_loader)
+            ) = self.compute_task_range(loader=val_loader_range)
             (
                 test_task_range_res,
                 test_task_range_spd,
                 test_task_range_res_norm,
                 test_task_range_spd_norm,
-            ) = self.compute_task_range(loader=test_loader)
+            ) = self.compute_task_range(loader=test_loader_range)
             print("VAL task range: ", val_task_range_res, val_task_range_res_norm)
             if self.wandb:
                 wandb.log(
@@ -369,91 +420,74 @@ class Experiment(object):
                     loader=test_loader, model=model, split_mask_name="test_mask"
                 )
 
-            if self.track_range and epoch % self.track_epoch == 0:
+            if self.track_range and (
+                epoch % self.track_epoch_every == 0
+                or epoch == self.max_epochs - 1
+                or epoch in self.track_epochs
+            ):
+                splits = self.range_splits
+                ranges = {split: {} for split in splits}
 
-                # Record Jacobian/range measure for model
-                (
-                    train_range_res,
-                    train_range_spd,
-                    train_range_res_norm,
-                    train_range_spd_norm,
-                ) = self.compute_range_stats(
-                    loader=train_loader_range,
-                    model=model,
-                    split_mask_name="train_mask",
-                )
-                val_range_res, val_range_spd, val_range_res_norm, val_range_spd_norm = (
-                    self.compute_range_stats(
-                        loader=val_loader_range,
+                for split in splits:
+                    if split == "train":
+                        loader = train_loader_range
+                    elif split == "val":
+                        loader = val_loader_range
+                    else:
+                        loader = test_loader_range
+
+                    # Compute range stats
+                    ranges[split]["res"], ranges[split]["spd"], ranges[split][
+                        "res_norm"
+                    ], ranges[split]["spd_norm"] = self.compute_range_stats(
+                        loader=loader,
                         model=model,
-                        split_mask_name="val_mask",
+                        split_mask_name=f"{split}_mask",
+                        epoch=epoch,
+                        num_fold=num_fold,
                     )
-                )
-                (
-                    test_range_res,
-                    test_range_spd,
-                    test_range_res_norm,
-                    test_range_spd_norm,
-                ) = self.compute_range_stats(
-                    loader=test_loader_range,
-                    model=model,
-                    split_mask_name="test_mask",
-                )
-                print("VAL RANGE res: ", val_range_res, test_range_res)
-                print("VAL RANGE spd: ", val_range_spd, test_range_spd)
+
+                logger.info(f"Epoch {epoch}: Range stats: {ranges}")
 
             # Append to loss history
             loss_history["train"].append(train_loss)
             loss_history["val"].append(val_loss)
             loss_history["test"].append(test_loss)
-            if self.track_range and epoch % self.track_epoch == 0:
-                loss_history["test_range"].append(test_range_res)
-                loss_history["val_range"].append(val_range_res)
-                loss_history["train_range"].append(train_range_res)
-                loss_history["test_range_norm"].append(test_range_res_norm)
-                loss_history["val_range_norm"].append(val_range_res_norm)
-                loss_history["train_range_norm"].append(train_range_res_norm)
-                loss_history["test_range_spd"].append(test_range_spd)
-                loss_history["val_range_spd"].append(val_range_spd)
-                loss_history["train_range_spd"].append(train_range_spd)
-                loss_history["test_range_spd_norm"].append(test_range_spd_norm)
-                loss_history["val_range_spd_norm"].append(val_range_spd_norm)
-                loss_history["train_range_spd_norm"].append(train_range_spd_norm)
+            if self.track_range and epoch % self.track_epoch_every == 0:
+                for split in splits:
+                    range_res = ranges[split]["res"]
+                    range_spd = ranges[split]["spd"]
+                    range_res_norm = ranges[split]["res_norm"]
+                    range_spd_norm = ranges[split]["spd_norm"]
 
-            if self.wandb and self.track_range and epoch % self.track_epoch == 0:
-                wandb.log(
-                    {
-                        "Train/Loss": train_loss,
-                        "Val/Loss": val_loss,
-                        "Test/Loss": test_loss,
-                        f"Train/{self.metric_type}": train_metric,
-                        f"Val/{self.metric_type}": val_metric,
-                        f"Test/{self.metric_type}": test_metric,
-                        "Test/RangeRes": test_range_res,
-                        "Val/RangeRes": val_range_res,
-                        "Train/RangeRes": train_range_res,
-                        "Test/RangeResNorm": test_range_res_norm,
-                        "Val/RangeResNorm": val_range_res_norm,
-                        "Train/RangeResNorm": train_range_res_norm,
-                        "Test/RangeSPD": test_range_spd,
-                        "Val/RangeSPD": val_range_spd,
-                        "Train/RangeSPD": train_range_spd,
-                        "Test/RangeSPDNorm": test_range_spd_norm,
-                        "Val/RangeSPDNorm": val_range_spd_norm,
-                        "Train/RangeSPDNorm": train_range_spd_norm,
-                    }
-                )
-            elif self.wandb:
-                wandb.log(
-                    {
-                        "Train/Loss": train_loss,
-                        "Val/Loss": val_loss,
-                        "Test/Loss": test_loss,
-                        f"Train/{self.metric_type}": train_metric,
-                        f"Val/{self.metric_type}": val_metric,
-                        f"Test/{self.metric_type}": test_metric,
-                    }
-                )
+                    # Append to loss history
+                    loss_history[f"{split}_range"].append(range_res)
+                    loss_history[f"{split}_range_spd"].append(range_spd)
+                    loss_history[f"{split}_range_norm"].append(range_res_norm)
+                    loss_history[f"{split}_range_spd_norm"].append(range_spd_norm)
+
+            if self.wandb:
+                wandb_log = {
+                    "Train/Loss": train_loss,
+                    "Val/Loss": val_loss,
+                    "Test/Loss": test_loss,
+                    f"Train/{self.metric_type}": train_metric,
+                    f"Val/{self.metric_type}": val_metric,
+                    f"Test/{self.metric_type}": test_metric,
+                }
+                if self.track_range and epoch % self.track_epoch_every == 0:
+                    for split in splits:
+                        wandb_log.update(
+                            {
+                                f"{split.capitalize()}/RangeRes": ranges[split]["res"],
+                                f"{split.capitalize()}/RangeResNorm": ranges[split]["res_norm"],
+                                f"{split.capitalize()}/RangeSPD": ranges[split]["spd"],
+                                f"{split.capitalize()}/RangeSPDNorm": ranges[split]["spd_norm"],
+                            }
+                        )
+
+                wandb.log(wandb_log)
+
 
             # Store current metrics
             losses_n_metrics = LossesAndMetrics(
@@ -593,6 +627,7 @@ class Experiment(object):
         loader: DataLoader,
         model: MPNN,
         split_mask_name: str,
+        **kwargs,
     ) -> Tuple[float, Any]:
         """
         Compute the Jacobian loss and the average range of the model on the given data loader.
@@ -608,28 +643,37 @@ class Experiment(object):
         """
         model.eval()
 
-        range_res_total, range_spd_total = 0, 0
-        range_res_norm_total, range_spd_norm_total = 0, 0
+        range_stats, range_vars = (
+            {
+                "range_res": 0.0,
+                "range_res_norm": 0.0,
+                "range_spd": 0.0,
+                "range_spd_norm": 0.0,
+            }
+            for _ in range(2)
+        )
+        range_stats_path = None
 
         for data in loader:
             if self.batch_norm and (data.x.shape[0] == 1 or data.num_graphs == 1):
-                continue
+                continue # TODO: I'm not really sure what this is for, did we add it?
+            data = data.to(device=self.device)
 
-            edge_attr = data.edge_attr
-            if data.edge_attr is not None:
-                edge_attr = edge_attr.to(device=self.device)
+            if self.dataset.is_heterophilic() or len(data.y.shape) == 1:
+                out_dim = len(torch.unique(data.y))
+            else:
+                out_dim = data.y.shape[1]
 
             # Compute Jacobian between model input and output
             diff_model = DiffModel(
                 model=model,  # separate class to ensure safety wrt mutable vars
-                edge_index=data.edge_index.to(device=self.device),
-                edge_attr=edge_attr,
-                batch=data.batch.to(device=self.device),
-                pestat=self.pos_enc.get_pe(data=data, device=self.device),
+                data_batch=data,
+                output_dim=out_dim,
                 use_jacobian=self.use_jacobian,
             )
 
             # Next we compute the Jacobian of the model on the data, or the Hessian if graph_level
+            sample_kwargs = {}
             if (
                 self.graph_level and not self.use_jacobian
             ):  # if use_jacobian then we still compute jacobian even if graph-level
@@ -643,32 +687,161 @@ class Experiment(object):
                 range_mat = range_mat.sum(
                     0
                 )  # [num_batch_nodes, in_dim, num_batch_nodes, in_dim] align the shape with that of node-level
+                # Reduce Hessian along node feature channels
+                # [N, out_dim, N, in_dim] -> [N, N]
+                range_mat = torch.abs(range_mat)
+                range_mat = range_mat.sum(dim=1).sum(dim=2)
+
+            elif self.sample_range and "epoch" in kwargs:
+                # Very large graphs necessitate a sampled Jacobian
+                if len(loader)> 1:
+                    raise NotImplementedError("Sampling only supported for single-graph datasets at present")
+                epoch = kwargs["epoch"]
+                num_fold = kwargs["num_fold"]
+                split = split_mask_name.split("_")[0]
+                dataset_str = str(self.dataset).replace("Dataset.", "")
+                # Sampling stats
+                in_channel_sample_prob = self.in_channel_sample_prob
+                out_channel_sample_prob = self.out_channel_sample_prob
+                in_node_sample_prob = self.in_node_sample_prob
+                out_node_sample_prob = self.out_node_sample_prob
+                sampling_seed = num_fold
+
+                # Try to load saved Jacobian
+
+                range_path = join(
+                    "range_results",
+                    dataset_str,
+                    str(self.model_type).replace("ModelType.", ""),
+                    split,
+                    f"sampling-nodes-in{in_node_sample_prob:.2f}out{out_node_sample_prob:.2f}-channels-in{in_channel_sample_prob:.2f}out{out_channel_sample_prob:.2f}",
+                    str(sampling_seed),
+                )
+                os.makedirs(join(range_path, str(sampling_seed)), exist_ok=True)
+                range_stats_path = join(
+                    range_path,
+                    f"range_stats_fold{num_fold:02d}_e{epoch:03d}.csv",
+                )
+                if self.virtual_node:
+                    range_stats_path = range_stats_path.replace(
+                        "range_stats_", "range_stats_+vn_"
+                    )
+                jacobian_path = range_stats_path.replace("range_stats_", "").replace(
+                    ".csv", ".pt"
+                )
+
+                total_nodes = data.x.shape[0] - int(self.virtual_node)
+                num_in_channels = round(data.x.shape[1] * in_channel_sample_prob)
+                num_out_channels = round(out_dim * out_channel_sample_prob)
+                num_in_nodes = round(total_nodes * in_node_sample_prob)
+                num_out_nodes = round(total_nodes * out_node_sample_prob)
+
+                sample_kwargs = dict(
+                    num_in_channels=num_in_channels,
+                    num_out_channels=num_out_channels,
+                    num_in_nodes=num_in_nodes,
+                    num_out_nodes=num_out_nodes,
+                )
+
+                torch.manual_seed(sampling_seed)
+                in_dim_mask = torch.randperm(data.x.shape[1])[:num_in_channels]
+                out_dim_mask = torch.randperm(out_dim)[:num_out_channels]
+                in_node_mask = torch.randperm(total_nodes)[:num_in_nodes]
+                out_node_mask = torch.randperm(total_nodes)[:num_out_nodes]
+
+                try:
+                    jacobian = torch.load(
+                        jacobian_path
+                    )  # [num_out_nodes, num_in_nodes]
+                    logger.info(f"Loaded Jacobian from {jacobian_path}")
+                    assert (
+                        jacobian.shape[0] == num_out_nodes
+                    ), f"Shape mismatch, {jacobian.shape[0]=}, {num_out_nodes=}"
+                except:
+
+                    logger.info(
+                        "Computing sampled Jacobian with the following parameters:"
+                        f"num_in_channels: {num_in_channels}\n"
+                        f"num_out_channels: {num_out_channels}\n"
+                        f"num_in_nodes: {num_in_nodes}\n"
+                        f"num_out_nodes: {num_out_nodes}\n"
+                        f"sampling_seed: {sampling_seed}"
+                    )
+                    jacobian = diff_model.sample_jacobian(
+                        data.x.to(device=self.device),
+                        in_node_mask=in_node_mask,
+                        out_node_mask=out_node_mask,
+                        in_dim_mask=in_dim_mask,
+                        out_dim_mask=out_dim_mask,
+                    )  # -> abs summed matrix, num_out_nodes x num_in_nodes
+                    torch.save(
+                        jacobian, jacobian_path
+                    )  # save this version to save space
+                    logger.info(f"Saved Jacobian to {jacobian_path}")
+
+                # Create a full (abs summed, so N x N) Jacobian of zeros
+                range_mat = torch.zeros(total_nodes, total_nodes)
+                # Insert the sampled values into the full Jacobian
+                range_mat[
+                    out_node_mask[:, None],
+                    in_node_mask[None, :],
+                ] = jacobian
 
             else:
-                jacobian = diff_model.jacobian(
+                jacobian = diff_model.compute_jacobian(
                     data.x.to(device=self.device)
                 )  # [num_batch_nodes, dim_out, num_batch_nodes, dim_in]
                 range_mat = jacobian
+                # Reduce Jacobian along node feature channels
+                # [N, out_dim, N, in_dim] -> [N, N]
+                range_mat = torch.abs(range_mat)
+                range_mat = range_mat.sum(dim=1).sum(dim=2)
 
-            # Reduce Jacobian/Hessian along node feature channels
-            # [N, out_dim, N, in_dim] -> [N, N]
-            range_mat = torch.abs(range_mat)
-            range_mat = range_mat.sum(dim=1).sum(dim=2)
+            ## COMPUTE RANGE MEASURES ##
+            for norm in [True, False]:
+                for dist in ["res", "spd"]:
+                    if not hasattr(data, f"edge_attr_{dist}"):
+                        logger.warning(
+                            f"Data object does not have edge_attr_{dist}, skipping {dist} range measure"
+                        )
+                        continue
+                    rho = compute_range(
+                        data=data,
+                        range_mat=range_mat,
+                        norm=norm,
+                        dist=dist,
+                        out_dim=out_dim,
+                        virtual_node=self.virtual_node,
+                        **sample_kwargs,
+                    )
+                    range_stats[f"range_{dist}{'_norm' if norm else ''}"] += float(rho)
+                    range_vars[  # rho^2 for variance
+                        f"range_{dist}{'_norm' if norm else ''}"
+                    ] += (float(rho) ** 2)
 
-            range_res_total += compute_range(data, range_mat, norm=False, dist="res")
-            range_spd_total += compute_range(data, range_mat, norm=False, dist="spd")
-            range_res_norm_total += compute_range(
-                data, range_mat, norm=True, dist="res"
-            )
-            range_spd_norm_total += compute_range(
-                data, range_mat, norm=True, dist="spd"
-            )
+        ## AGGREGATE AND SAVE STATS ##
 
-        range_res = range_res_total / len(loader.dataset)
-        range_res_norm = range_res_norm_total / len(loader.dataset)
-        range_spd = range_spd_total / len(loader.dataset)
-        range_spd_norm = range_spd_norm_total / len(loader.dataset)
-        return (range_res, range_spd, range_res_norm, range_spd_norm)
+        # Get means of range measures
+        for key in range_stats.keys():
+            range_stats[key] /= len(loader)
+        # Get variances of range measures
+        for key in range_vars.keys():
+            mean = range_stats[key]
+            mean_sq = range_vars[key] / len(loader)
+            range_vars[key] = mean_sq - mean**2
+
+        # Save range stats
+        if range_stats_path is not None:
+            range_df = pd.DataFrame({"range": range_stats, "var": range_vars})
+            range_df.to_csv(range_stats_path)
+            logger.info(f"Saved range stats to {range_stats_path}")
+
+        return (
+            range_stats["range_res"],
+            range_stats["range_spd"],
+            range_stats["range_res_norm"],
+            range_stats["range_spd_norm"],
+        )
 
     def compute_task_range(self, loader: DataLoader) -> Tuple[float, float]:
         """Compute ground-truth range measure for synthetic task using Jacobian and resistance/spd as range functions"""
@@ -715,19 +888,35 @@ class Experiment(object):
 
             # Calculate range measures
             rho_res_total += compute_range(
-                data.to(self.device), range_mat_abs, norm=False, dist="res"
+                data.to(self.device),
+                range_mat_abs,
+                norm=False,
+                dist="res",
+                out_dim=out_dim,
             )
 
             rho_res_norm_total += compute_range(
-                data.to(self.device), range_mat_abs, norm=True, dist="res"
+                data.to(self.device),
+                range_mat_abs,
+                norm=True,
+                dist="res",
+                out_dim=out_dim,
             )
 
             rho_spd_total += compute_range(
-                data.to(self.device), range_mat_abs, norm=False, dist="spd"
+                data.to(self.device),
+                range_mat_abs,
+                norm=False,
+                dist="spd",
+                out_dim=out_dim,
             )
 
             rho_spd_norm_total += compute_range(
-                data.to(self.device), range_mat_abs, norm=True, dist="spd"
+                data.to(self.device),
+                range_mat_abs,
+                norm=True,
+                dist="spd",
+                out_dim=out_dim,
             )
         return (
             rho_res_total / len(loader.dataset),
@@ -738,16 +927,12 @@ class Experiment(object):
 
     def generate_synth_task(self) -> Optional[Callable]:
         """Returns a transform function that generates the LR synthetic task."""
-        if not self.lr_exp:
-            return None
-
-        # Wrapper for syn_task_preprocessing with correct parameters
+        
         def transform(data):
             return syn_task_preprocessing(
                 data=data,
                 distance_fn=self.distance_fn,
                 interaction_fn=self.interaction_fn,
-                feature_alpha=self.alpha,
                 track_range=self.track_range,
                 graph_level=self.graph_level,
             )
@@ -818,8 +1003,8 @@ class Experiment(object):
         # Perform evaluation on all splits
         for split_name, loader in [
             ("train", train_loader),
-            ("val", val_loader),
             ("test", test_loader),
+            ("val", val_loader),
         ]:
             loss, metric = self.test(
                 loader=loader, model=model, split_mask_name=f"{split_name}_mask"

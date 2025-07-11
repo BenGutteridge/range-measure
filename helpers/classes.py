@@ -94,6 +94,8 @@ class GNNArgs(NamedTuple):
     in_dim: int
     out_dim: int
 
+    virtual_node: bool
+
     gin_mlp_func: Callable
 
     def load_net(self) -> ModuleList:

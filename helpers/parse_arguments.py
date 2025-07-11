@@ -142,14 +142,6 @@ def parse_arguments():
     )
     # --------------------------------------------------------------------------------------
     # ------------------- For LR experiments -----------------------------------------------
-    # #
-    parser.add_argument(
-        "--lr_exp", dest="lr_exp", default=False, action="store_true", required=False
-    )  # whether or not to use the LR synthetic task features/labels
-    parser.add_argument(
-        "--alpha", dest="alpha", default=0.0, type=float, required=False
-    )  # feats X' = alpha * X + (1 - alpha) * X_{random_uniform[0,1]}
-
     # --------------------------------------------------------------------------------------
     # For synthetic experiments
     parser.add_argument(
@@ -183,8 +175,30 @@ def parse_arguments():
     )  # whether or not to track the Jacobian of the model during training
 
     parser.add_argument(
-        "--track_epoch", dest="track_epoch", default=1, type=int, required=False
-    )
+        "--range_splits",
+        dest="range_splits",
+        default=["train", "val", "test"],
+        nargs="+",
+        choices=["train", "val", "test"],
+        help="Split(s) to track the range measure on. Choose one or more: train, val, test. Defaults to all three.",
+    ) # example usage: --range_splits train val -> track range on train and val splits
+
+    parser.add_argument(
+        "--track_epoch_every", 
+        dest="track_epoch_every", 
+        default=1, 
+        type=int, 
+        required=False,
+    ) # Tracks every nth epoch
+
+    # Option to add a list of integers to track specific epochs
+    parser.add_argument(
+        "--track_epochs",
+        nargs="+",
+        required=False,
+        default=[],
+        type=int,
+    )  # example useage: --track_epochs 1 2 3 4 5
 
     parser.add_argument(
         "--wandb",
@@ -218,6 +232,49 @@ def parse_arguments():
         action="store_true",
         required=False,
         help="If true then it will use the final layer's jacobian to compute the range, if false it uses the hessian of the output.",
+    )
+
+    parser.add_argument(
+        "--virtual_node",
+        dest="virtual_node",
+        default=False,
+        action="store_true",
+        required=False,
+        help="Adds a VN",
+    )
+
+    # Params for sampling Jacobian for range exps for large graphs for heterophilic tasks
+    parser.add_argument(
+        "--in_channel_sample_prob",
+        dest="in_channel_sample_prob",
+        default=1.0,
+        type=float,
+        required=False,
+        help="Probability of sampling an in-channel.",
+    )
+    parser.add_argument(
+        "--out_channel_sample_prob",
+        dest="out_channel_sample_prob",
+        default=1.0,
+        type=float,
+        required=False,
+        help="Probability of sampling an out-channel.",
+    )
+    parser.add_argument(
+        "--in_node_sample_prob",
+        dest="in_node_sample_prob",
+        default=1.0,
+        type=float,
+        required=False,
+        help="Probability of sampling an in-node.",
+    )
+    parser.add_argument(
+        "--out_node_sample_prob",
+        dest="out_node_sample_prob",
+        default=1.0,
+        type=float,
+        required=False,
+        help="Probability of sampling an out-node.",
     )
 
     return parser.parse_args()

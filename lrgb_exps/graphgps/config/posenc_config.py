@@ -14,6 +14,7 @@ def set_cfg_posenc(cfg):
     cfg.posenc_HKdiagSE = CN()
     cfg.posenc_ElstaticSE = CN()
     cfg.posenc_EquivStableLapPE = CN()
+    cfg.posenc_RRWP = CN()
 
     # Common arguments to all PE types.
     for name in [
@@ -99,3 +100,11 @@ def set_cfg_posenc(cfg):
 
     cfg.posenc_RWSEEdge.num_global = 2
     cfg.posenc_RWSEEdge.global_edge_dropout = 0.2
+
+    # Note: for RRWP from grit
+    cfg.posenc_RRWP.enable = False
+    cfg.posenc_RRWP.ksteps = 21
+    cfg.posenc_RRWP.add_identity = True
+    cfg.posenc_RRWP.spd = False
+    cfg.posenc_RRWP.add_node_attr = False
+    cfg.posenc_RRWP.add_inverse = False

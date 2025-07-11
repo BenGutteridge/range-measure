@@ -3,6 +3,7 @@ __pycache__/
 
 datasets*
 results*
+range_results/
 plots/
 wandb/
 mlruns*
@@ -10,6 +11,7 @@ mlruns*
 scripts/bash/
 scripts/slurm/
 scratch/
+cprofile/
 
 model_weights/
 

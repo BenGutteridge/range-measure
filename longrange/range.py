@@ -12,31 +12,75 @@ from torch_geometric.utils import dense_to_sparse
 from tqdm import tqdm
 from loguru import logger
 from math import ceil
+from helpers.gpu_management.gpu_utils import GPUTracker
+import time
 
 
 class DiffModel(nn.Module):
-    """A GNN is not differentiable in the edge_index argument so we can't call Jacobian on it,
-    therefore we wrap it into another class which is differentiable in all its arguments,
-    by storing the edge_index tensor"""
+    """
+    A differentiable wrapper for GNN models that enables computing the Jacobian
+    with respect to node features by encapsulating all necessary inputs from a DataBatch.
+    Used for SOTA experiments on LRGB GraphGym tasks.
+    """
 
     def __init__(
         self,
         model: nn.Module,
-        edge_index: LongTensor,
-        pestat: Optional[list[Tensor]] = None,
-        edge_attr: OptTensor = None,
-        batch: OptTensor = None,
+        data_batch: pyg.data.Batch,
+        output_dim: int,
         use_jacobian: bool = False,
+        lrgb_mode: bool = False,
     ):
-        super(DiffModel, self).__init__()
-        self.model = model
-        self.edge_index = edge_index
-        self.pestat = pestat
-        self.edge_attr = edge_attr
-        self.batch = batch
-        self.use_jacobian = use_jacobian
+        """
+        Initializes the LRGBDiffModel.
 
-    def forward(self, x):
+        Args:
+            model (nn.Module): The GNN model to wrap.
+            data_batch (pyg.data.Batch): The PyG DataBatch object containing graph data.
+            output_dim (int): The output dimension of the model.
+            pestat (Optional[list[Tensor]], optional): Positional encoding statistics. Defaults to None.
+            use_jacobian (bool, optional): Flag to indicate if Jacobian should be used. Defaults to False.
+        """
+        super(DiffModel, self).__init__()
+        
+        self.model = model
+        self.use_jacobian = use_jacobian
+        self.output_dim = output_dim
+        self.device = data_batch.x.device
+        if self.device != torch.device("cpu"):
+            self.gpu_tracker = GPUTracker(self.device)
+        self.lrgb_mode = lrgb_mode
+
+        for attr in [
+            "edge_index",
+            "edge_attr",
+            "batch",
+            "y",
+            "ptr",
+            "pestat_RWSE",
+            "EigVals",
+            "EigVecs",
+        ]:
+            if hasattr(data_batch, attr):
+                self.register_buffer(
+                    attr,
+                    getattr(data_batch, attr).clone().to(self.device)
+                    if getattr(data_batch, attr) is not None
+                    else None,
+                )
+        # pestat taken as an input to models.MPNN.MPNN() forward pass
+        if hasattr(self, "pestat_RWSE"):
+            self.pestat = self.pestat_RWSE
+        elif hasattr(self, "EigVals") and hasattr(self, "EigVecs"):
+            self.pestat = [self.EigVals, self.EigVecs]
+        else:
+            self.pestat = None
+        
+
+    def forward(self, x: Tensor):
+        if self.lrgb_mode:
+            return self.forward_lrgb(x)
+        
         if self.use_jacobian:
             self.model.make_headless()
         result = self.model(
@@ -50,13 +94,95 @@ class DiffModel(nn.Module):
             self.model.make_headless(undo=True)
         return result
 
-    def jacobian(self, x):
+    def forward_lrgb(self, x: Tensor) -> Tensor:
         """
-        Jacobian of the model with respect to x.
-        If the model's output is [N, D] and input is [N, C] then the jacobian is a tensor of shape [N, D, N, C]
-        """
-        return jacobian(self.forward, x)
+        Forward pass of the wrapped model.
 
+        Args:
+            x (Tensor): Node feature tensor of shape [num_nodes, feature_dim].
+
+        Returns:
+            Tensor: Model output.
+        """
+        new_batch = pyg.data.Batch()
+        new_batch.x = x
+        for attr in [
+            "y",
+            "edge_index",
+            "edge_attr",
+            "batch",
+            "ptr",
+            "split",
+            "pestat_RWSE",
+            "EigVals",
+            "EigVecs",
+        ]:
+            if hasattr(self, attr):
+                setattr(new_batch, attr, getattr(self, attr))
+
+        return self.model(new_batch)[0]  # model returns (pred, true); we only want pred
+    
+
+    def compute_jacobian(self, x: Tensor) -> Tensor:
+        """
+        Computes the Jacobian of the model's output with respect to input features x.
+
+        Args:
+            x (Tensor): Input node feature tensor of shape [num_nodes, feature_dim].
+
+        Returns:
+            Tensor: Jacobian tensor.
+                     If model output is [num_nodes, output_dim], Jacobian shape will be [num_nodes, output_dim, num_nodes, feature_dim].
+        """
+        x_clone = x.requires_grad_(True).to(self.device)
+        return jacobian(self.forward, x_clone)
+    
+
+    def sample_jacobian(
+        self,
+        x: Tensor,
+        in_node_mask: Tensor,
+        in_dim_mask: Tensor,
+        out_node_mask: Tensor,
+        out_dim_mask: Tensor,
+    ) -> Tensor:
+        """
+        Grid samples the Jacobian of the model's output with respect to input features x.
+
+        Args:
+            x (Tensor): Input node feature tensor of shape [num_nodes, feature_dim].
+            num_in_channels (int): number of input channels to sample.
+            num_out_channels (int): number of output channels to sample.
+            num_in_nodes (int): number of input nodes to sample.
+            num_out_nodes (int): number of output nodes to sample.
+            sampling_seed (int): random seed for sampling.
+
+        Returns:
+            Tensor: Jacobian tensor.
+                     Jacobian shape will be [num_nodes, out_channels, num_nodes, in_channels]].
+        """
+        # Ensure x requires gradient
+        x_clone = x.requires_grad_(True).to(self.device)
+
+        # Insert only sampled values of x into the cloned overall x
+        def forward_wrapper(x0):
+            x_updated = x_clone.detach()
+            x_updated[in_node_mask[:, None], in_dim_mask] = x0
+            return self.forward(x_updated)[out_node_mask[:, None], out_dim_mask]
+
+        x_in = x_clone[in_node_mask, :][:, in_dim_mask]
+        
+        logger.info(
+            f"Sampling {out_node_mask.shape[0]}x{out_dim_mask.shape[0]}x{in_node_mask.shape[0]}x{in_dim_mask.shape[0]} Jacobian..."
+        )
+        t0 = time.time()
+        sampled_jac = jacobian(forward_wrapper, x_in)  # .detach().cpu()
+        logger.info(f"Obtained {sampled_jac.shape} Jacobian in {time.time()-t0:.2f}s")
+
+        abs_summed_sampled_jac = sampled_jac.detach().cpu().abs().sum(dim=1).sum(dim=2)
+
+        return abs_summed_sampled_jac
+    
     def hessian(self, x):
         """
         Hessian of the model with respect to x.
@@ -71,185 +197,15 @@ class DiffModel(nn.Module):
         self.model = model
 
 
-from torch_geometric.graphgym.config import cfg
-
-
-class LRGBDiffModel(nn.Module):
-    """
-    A differentiable wrapper for GNN models that enables computing the Jacobian
-    with respect to node features by encapsulating all necessary inputs from a DataBatch.
-    Used for SOTA experiments on LRGB GraphGym tasks.
-    """
-
-    def __init__(
-        self,
-        model: nn.Module,
-        data_batch: pyg.data.Batch,
-    ):
-        """
-        Initializes the LRGBDiffModel.
-
-        Args:
-            model (nn.Module): The GNN model to wrap.
-            data_batch (pyg.data.Batch): The PyG DataBatch object containing graph data.
-        """
-        super(LRGBDiffModel, self).__init__()
-        device = data_batch.x.device
-        self.model = model.to(device)
-        self.device = device
-        self.split = data_batch.split
-        self.chunk_size = (
-            175  # hard coded value, will depend on the GPU memory available
-        )
-        try:
-            self.num_classes = model.post_mp.mlp[-1].out_features
-        except:
-            pass
-
-        if data_batch.num_nodes > self.chunk_size:
-            # Otherwise throws a CUDA error
-            self.chunk_jacobian = ceil(data_batch.num_nodes / self.chunk_size)
-            logger.info(
-                f"Chunking Jacobian computation into {self.chunk_jacobian} parts"
-            )
-        else:
-            self.chunk_jacobian = None
-
-        # Clone and store fixed attributes to prevent external mutations
-        self.register_buffer("edge_index", data_batch.edge_index.clone().to(device))
-        self.register_buffer(
-            "edge_attr",
-            (
-                data_batch.edge_attr.clone().to(device)
-                if data_batch.edge_attr is not None
-                else None
-            ),
-        )
-        self.register_buffer(
-            "batch",
-            (
-                data_batch.batch.clone().to(device)
-                if data_batch.batch is not None
-                else None
-            ),
-        )
-        self.register_buffer(
-            "y",
-            (data_batch.y.clone().to(device) if data_batch.y is not None else None),
-        )
-        self.register_buffer(
-            "ptr",
-            (data_batch.ptr.clone().to(device) if data_batch.ptr is not None else None),
-        )
-        if cfg.posenc_RWSE.enable:
-            self.register_buffer(
-                "pestat_RWSE",
-                (
-                    data_batch.pestat_RWSE.clone().to(device)
-                    if data_batch.pestat_RWSE is not None
-                    else None
-                ),
-            )
-        if cfg.posenc_LapPE.enable:
-            self.register_buffer(
-                "EigVals",
-                (
-                    data_batch.EigVals.clone().to(device)
-                    if data_batch.EigVals is not None
-                    else None
-                ),
-            )
-            self.register_buffer(
-                "EigVecs",
-                (
-                    data_batch.EigVecs.clone().to(device)
-                    if data_batch.EigVecs is not None
-                    else None
-                ),
-            )
-
-    def forward(self, x: Tensor) -> Tensor:
-        """
-        Forward pass of the wrapped model.
-
-        Args:
-            x (Tensor): Node feature tensor of shape [num_nodes, feature_dim].
-
-        Returns:
-            Tensor: Model output.
-        """
-        # Construct a new DataBatch with the input x and fixed attributes
-        new_batch = pyg.data.Batch()
-        new_batch.x = x
-        new_batch.y = self.y
-        new_batch.edge_index = self.edge_index
-        new_batch.edge_attr = self.edge_attr
-        new_batch.batch = self.batch
-        new_batch.ptr = self.ptr
-        new_batch.split = self.split
-        if cfg.posenc_RWSE.enable:
-            new_batch.pestat_RWSE = self.pestat_RWSE
-        if cfg.posenc_LapPE.enable:
-            new_batch.EigVals = self.EigVals
-            new_batch.EigVecs = self.EigVecs
-
-        return self.model(new_batch)[0]  # model returns pred, true
-
-    def compute_jacobian(self, x: Tensor, chunk_idx=None) -> Tensor:
-        """
-        Computes the Jacobian of the model's output with respect to input features x.
-
-        Args:
-            x (Tensor): Input node feature tensor of shape [num_nodes, feature_dim].
-
-        Returns:
-            Tensor: Jacobian tensor.
-                     If model output is [num_nodes, output_dim], Jacobian shape will be [num_nodes, output_dim, num_nodes, feature_dim].
-        """
-        # Ensure x requires gradient
-        x_clone = x.requires_grad_(True).to(self.device)
-
-        if self.chunk_jacobian:
-            if chunk_idx is None:
-                raise ValueError("chunk_idx must be provided for chunked Jacobian")
-            chunked_forward = lambda x0: self.forward(x0)[
-                self.chunk_size * chunk_idx : self.chunk_size * (chunk_idx + 1)
-            ]
-            return jacobian(chunked_forward, x_clone)
-
-        return jacobian(self.forward, x_clone)
-
-    def compute_hessian(self, x: Tensor) -> Tensor:
-        """
-        Computes the Hessian of the model's output with respect to input features x.
-
-        Args:
-            x (Tensor): Input node feature tensor of shape [num_nodes, feature_dim].
-
-        Returns:
-            Tensor: Hessian tensor.
-                     If model output is [num_nodes, output_dim], Hessian shape will be [num_nodes, output_dim, num_nodes, feature_dim, num_nodes, feature_dim].
-        """
-        # Ensure x requires gradient
-        x = x.requires_grad_(True).to(self.device)
-
-        abs_summed_hessian = 0
-        for idx in tqdm(range(self.num_classes)):
-            x_clone = x.clone().detach().requires_grad_(True).to(self.device)
-            forward_wrapper = lambda x0: self.forward(x0).squeeze()[idx]
-            hess = abs(autograd_hessian(forward_wrapper, x_clone))
-            abs_summed_hessian += hess.detach()
-            del hess, x_clone
-            torch.cuda.empty_cache()
-
-        return abs_summed_hessian
-
 
 def compute_range(
     data: pyg.data.Data,
     range_mat: Tensor,
-    norm: bool = False,
-    dist: str = "res",
+    norm: bool,
+    dist: str,
+    out_dim: int,
+    virtual_node: bool = False,
+    **sample_kwargs,
 ) -> Tensor:
     """
     Compute the range of the function, according to the specified distance function
@@ -260,17 +216,35 @@ def compute_range(
             Already taken abs() and reduced from [N, dim_out, N, dim_in] (or [dim_out, N, dim_in, N, dim_in] for Hessian) to [N, N] by summing over dim_out and dim_in.
         norm: bool indicating whether to use the range or the normalized range
         dist: str with the name of the distance function to use
+        out_dim: int, the total number of output channels
+        sample_kwargs: additional arguments to pass to the range computation: num_in_nodes, num_out_nodes, num_in_channels, num_out_channels (all ints)
 
     Returns:
         range: tensor of shape [N], the range of the function around each node
     """
     device = range_mat.device
+    num_nodes = range_mat.shape[0]
+    if virtual_node:
+        if num_nodes == data.num_nodes - 1:
+            # virtual node is implemented as a separate node in the data
+            # remove the last node
+            remove_last = True
+        elif num_nodes == data.num_nodes:
+            # virtual node is implemented within the model
+            remove_last = False
+        else:
+            raise ValueError(f"Node mismatch: range mat is {num_nodes} vs {data.num_nodes=}")
+    num_in_nodes = sample_kwargs.get("num_in_nodes", num_nodes)
+    num_out_nodes = sample_kwargs.get("num_out_nodes", num_nodes)
+    num_in_channels = sample_kwargs.get("num_in_channels", data.x.shape[1])
+    num_out_channels = sample_kwargs.get("num_out_channels", out_dim)
+
     if hasattr(data, "edge_index_dense"):
         edge_index_dist = data.edge_index_dense.to(device)
     else:
-        edge_index_dist = dense_to_sparse(torch.ones([data.num_nodes, data.num_nodes]))[
-            0
-        ].to(device)
+        edge_index_dist = dense_to_sparse(torch.ones([num_nodes, num_nodes]))[0].to(
+            device
+        )
     if dist == "res":
         edge_attr_dist = data.edge_attr_res.to(device)
     elif dist == "spd":
@@ -278,28 +252,45 @@ def compute_range(
     else:
         raise ValueError(f"Unknown distance function {dist}")
 
-    dist = torch.zeros([data.num_nodes, data.num_nodes], device=device)
+    dist = torch.zeros([num_nodes, num_nodes], device=device)
     dist[edge_index_dist[0], edge_index_dist[1]] = edge_attr_dist.squeeze()
     if norm:
-        normalizer = range_mat @ torch.ones(range_mat.shape[0], device=range_mat.device)
+        # Divide each Jacobian element by the row sum
+        normalizer = range_mat @ torch.ones(
+            range_mat.shape[0], device=range_mat.device
+        )  # row sum
         normalizer_inv = torch.pow(normalizer, -1).nan_to_num(0.0, posinf=0.0)
         range_mat_abs_norm = (
             torch.diag(normalizer_inv) @ range_mat
         )  # similar to random walk laplacian normalization
-        rho = torch.einsum(
+        rho = torch.einsum(  # elementwise product followed by column sum
             "ab, ab -> a", range_mat_abs_norm, dist
         )  # [N] # see normalized range definition in paper
     else:
         rho = torch.einsum(
             "ab, ab -> a", range_mat, dist
         )  # [N] # see range definition in paper
+        num_in_nodes = num_nodes if num_in_nodes is None else num_in_nodes
+        total_in_channels = data.x.shape[1]
+        rho *= (total_in_channels * out_dim * num_nodes) / (
+            num_in_channels * num_out_channels * num_in_nodes
+        )  # scale the estimate to account for unsampled nodes/channels
 
-    rho_mean = torch_scatter.scatter(
-        rho, data.batch.to(device), reduce="mean"
-    )  # [num_graphs] (1 for BS=1)
-    rho_total = rho_mean.sum()
-
-    return rho_total
+    if virtual_node:
+        assert (
+            len(data.batch.unique()) == 1
+        ), "Virtual node only supported for range computation with batch size 1"
+        if remove_last:
+            batch = data.batch.to(device)[:-1]
+        else:
+            batch = data.batch.to(device)
+    else:
+        batch = data.batch.to(device)
+    rho_sum = torch_scatter.scatter(
+        rho, batch, reduce="sum"
+    )  # [num_graphs] (1 for BS=1) # sum over node range in each graph
+    rho_mean = rho_sum / num_out_nodes
+    return rho_mean
 
 
 class HeadlessGraphLevelModelWrapper(nn.Module):
@@ -315,6 +306,7 @@ class HeadlessGraphLevelModelWrapper(nn.Module):
             self.layers = original_model.model.gnn_layers
         except:
             self.layers = original_model.model.layers
+        # skip post_mp
 
     def forward(self, batch):
         # Run the encoder and GNN layers, skip the post_mp

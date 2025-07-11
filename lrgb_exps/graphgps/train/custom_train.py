@@ -3,14 +3,12 @@ import time
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 from torch_geometric.graphgym.checkpoint import load_ckpt, save_ckpt, clean_ckpt
 from torch_geometric.graphgym.config import cfg
 from torch_geometric.graphgym.loss import compute_loss
 from torch_geometric.graphgym.register import register_train
 from torch_geometric.graphgym.utils.epoch import is_eval_epoch, is_ckpt_epoch
-import pickle
 
 from lrgb_exps.graphgps.loss.subtoken_prediction_loss import subtoken_cross_entropy
 from lrgb_exps.graphgps.utils import (
@@ -21,13 +19,14 @@ from lrgb_exps.graphgps.utils import (
     mean_average_distance,
     mean_norm,
 )
-from longrange.range import compute_range, LRGBDiffModel, HeadlessGraphLevelModelWrapper
+from longrange.range import compute_range, DiffModel, HeadlessGraphLevelModelWrapper
 from loguru import logger as log
 from tqdm import tqdm
 import os
 from os import path as osp
 import sys
 import pandas as pd
+from loguru import logger
 
 
 def train_epoch(logger, loader, model, optimizer, scheduler, batch_accumulation):
@@ -76,7 +75,7 @@ def eval_epoch(logger, loader, model, split="val"):
     for batch in loader:
         batch.split = split
         batch.to(torch.device(cfg.accelerator))
-        batch_original = batch.clone()
+
         if cfg.gnn.head == "inductive_edge":
             pred, true, extra_stats = model(batch)
         else:
@@ -110,187 +109,6 @@ def eval_epoch(logger, loader, model, split="val"):
             **extra_stats,
         )
         time_start = time.time()
-
-
-@register_train("eval_range")
-def eval_range(
-    _,
-    loaders,
-    model,
-    optimizer,
-    scheduler,
-    use_hessian=False,
-):
-    """
-    Customized training pipeline.
-
-    Args:
-        loaders: List of loaders
-        model: GNN model
-        optimizer: PyTorch optimizer
-        scheduler: PyTorch learning rate scheduler
-        use_hessian: Whether to compute final result Hessian instead of pre-pooling Jacobian for graph-level tasks.
-
-    """
-    split = cfg.longrange.split
-    subset = cfg.longrange.subset
-    epoch = cfg.longrange.epoch
-    load_ckpt(model, optimizer, scheduler, epoch)
-    loader = {"train": loaders[0], "val": loaders[1], "test": loaders[2]}[split]
-
-    file_id = f"{f'subset{subset}_' if subset > 0 else ''}e{epoch:03d}.pkl"
-    ranges_filename = f"{cfg.run_dir}/{split}/range_stats_{file_id}"
-    os.makedirs(f"{cfg.run_dir}/{split}/jacobians", exist_ok=True)
-    jacs_filename = f"{cfg.run_dir}/{split}/jacobians/jacobians_{file_id}"
-
-    if osp.exists(ranges_filename):
-        log.info(f"Range stats already computed for split {split} and epoch {epoch}.")
-        sys.exit(0)
-
-    log.info(f"Calculating range measure.\nSplit: {split}" f"\nEpoch: {epoch}")
-    model.eval()
-    range_stats, range_vars = (
-        {
-            "range_res": 0.0,
-            "range_res_norm": 0.0,
-            "range_spd": 0.0,
-            "range_spd_norm": 0.0,
-        }
-        for _ in range(2)
-    )
-
-    jacobians = [None for _ in range(len(loader))]
-    if osp.exists(jacs_filename):
-        log.info(f"Using pre-computed Jacobians from {jacs_filename}.")
-        with open(jacs_filename, "rb") as f:
-            jacobians = pickle.load(f)
-            log.info(
-                f"Loaded {sum(j is not None for j in jacobians)}/{len(jacobians)} saved Jacobians."
-            )
-    else:
-        jacobians = [None for _ in range(len(loader))]
-
-    for i, batch in enumerate(tqdm(loader)):
-
-        batch.split = split
-        batch.to(torch.device(cfg.accelerator))
-        batch_original = batch.clone().detach()
-
-        if jacobians[i] is not None:
-            summed_abs_jacobian = jacobians[i]
-        else:
-            # Calculate Jacobian from scratch
-
-            if (
-                "peptides" in cfg.dataset.name and not use_hessian
-            ):  # graph-level with Jacobian of node feats
-                differentiable_model = HeadlessGraphLevelModelWrapper(model)
-            else:
-                differentiable_model = model
-
-            diff_model = LRGBDiffModel(
-                model=differentiable_model,
-                data_batch=batch_original,
-            )  # separate class to ensure safety wrt mutable vars
-
-            if "peptides" in cfg.dataset.name:  # graph-level
-                if use_hessian:
-                    # Returns Hessian but we use Jacobian as catch-all for processing below
-                    jacobian = (
-                        diff_model.compute_hessian(batch_original.x).detach().cpu()
-                    )
-                    # Align the shape with that of node-level
-                    jacobian = (
-                        jacobian.abs().sum(1).squeeze(0)
-                    )  # -> [num_graphs, num_batch_nodes, in_dim, num_batch_nodes, in_dim]
-                else:  # use Jacobian on pre-pooling node features
-                    # As first dims will be the same for input and output, stop jacobian function from treating it as a batch dim by adding a dummy one
-                    x = batch_original.x.unsqueeze(0)
-
-                    if diff_model.chunk_jacobian:
-                        jacobian_abs_sum_chunks = []
-                        for chunk_idx in range(diff_model.chunk_jacobian):
-                            jacobian = (
-                                diff_model.compute_jacobian(x, chunk_idx=chunk_idx)
-                                .squeeze()
-                                .detach()
-                                .cpu()
-                            )
-                            jacobian_abs_sum_chunks.append(
-                                jacobian.abs().sum(dim=1).sum(dim=2)
-                            )
-                            del jacobian
-                            torch.cuda.empty_cache()
-                        summed_abs_jacobian = torch.cat(jacobian_abs_sum_chunks, dim=0)
-                    else:
-                        jacobian = (
-                            diff_model.compute_jacobian(x).squeeze().detach().cpu()
-                        )
-                        summed_abs_jacobian = jacobian.abs().sum(dim=1).sum(dim=2)
-                        del jacobian
-                        torch.cuda.empty_cache()
-
-            elif cfg.dataset.format == "PyG-VOCSuperpixels":
-                jacobian = (
-                    diff_model.compute_jacobian(batch_original.x)
-                    .squeeze()
-                    .detach()
-                    .cpu()
-                )
-                # Reduce Jacobian along node feature channels
-                summed_abs_jacobian = (
-                    torch.abs(jacobian).sum(dim=1).sum(dim=2)
-                )  # [N, out_dim, N, in_dim] -> [N, N]
-                del jacobian
-            else:
-                raise NotImplementedError(
-                    f"Dataset {cfg.dataset.format} {cfg.dataset.name} not supported."
-                )
-
-            jacobians[i] = summed_abs_jacobian.cpu()
-            del diff_model
-            torch.cuda.empty_cache()
-
-            # Save raw (abs, summed) Jacobians
-            if i % 10 == 0:
-                with open(jacs_filename, "wb") as f:
-                    pickle.dump(jacobians, f)
-                log.info(f"Saved {i} Jacobians to {jacs_filename}")
-
-        for norm in [True, False]:
-            for dist in ["res", "spd"]:
-                rho = compute_range(
-                    data=batch_original,
-                    range_mat=summed_abs_jacobian,
-                    norm=norm,
-                    dist=dist,
-                )
-                range_stats[f"range_{dist}{'_norm' if norm else ''}"] += float(rho)
-                range_vars[  # rho^2 for variance
-                    f"range_{dist}{'_norm' if norm else ''}"
-                ] += (float(rho) ** 2)
-
-    # Get means of range measures
-    for key in range_stats.keys():
-        range_stats[key] /= len(loader)
-    # Get variances of range measures
-    for key in range_vars.keys():
-        mean = range_stats[key]
-        mean_sq = range_vars[key] / len(loader)
-        range_vars[key] = mean_sq - mean**2
-
-    # Save raw (abs, summed) Jacobians
-    with open(jacs_filename, "wb") as f:
-        pickle.dump(jacobians, f)
-    log.info(f"Saved Jacobians to {jacs_filename}")
-
-    # Save range stats
-    range_df = pd.DataFrame({"range": range_stats, "var": range_vars})
-    with open(ranges_filename, "wb") as f:
-        pickle.dump(range_df, f)
-    log.info(f"Saved range stats to {ranges_filename}")
-
-    sys.exit(0)
 
 
 @register_train("custom")
@@ -333,6 +151,19 @@ def custom_train(loggers, loaders, model, optimizer, scheduler):
     split_names = ["val", "test"]
     full_epoch_times = []
     perf = [[] for _ in range(num_splits)]
+    
+    # Save ckpt at initialization as -1.ckpt
+    ckpt_dir = os.path.join(cfg.run_dir, "ckpt")
+    os.makedirs(ckpt_dir, exist_ok=True)
+    torch.save(
+        {
+            "model_state": model.state_dict(),
+            "optimizer_state": optimizer.state_dict(),
+            "scheduler_state": scheduler.state_dict(),
+        }, 
+        os.path.join(ckpt_dir, "-1.ckpt"),
+    ) 
+    
     for cur_epoch in range(start_epoch, cfg.optim.max_epoch):
         start_time = time.perf_counter()
         train_epoch(

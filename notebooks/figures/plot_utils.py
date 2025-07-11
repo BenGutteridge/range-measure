@@ -31,17 +31,35 @@ def get_final_epoch_stats(run_dir: str) -> dict:
     return res
 
 
-def load_and_aggregate_data(path, dataset, seed=0, subset=500):
+def load_and_aggregate_data(path, dataset, seed=0, subset=500, **sampling_kwargs):
     """
     Loads and aggregates DataFrames from pickle files.
     """
-    pattern = os.path.join(
-        path, f"{dataset}-*", str(seed), "*", f"range_stats_subset{subset}_e*.pkl"
-    )
+    if sampling_kwargs:
+        ch_in, ch_out, nod_in, nod_out, max_nod, min_nod, samp_seed = (
+            sampling_kwargs["in_channel_prob"],
+            sampling_kwargs["out_channel_prob"],
+            sampling_kwargs["in_node_prob"],
+            sampling_kwargs["out_node_prob"],
+            sampling_kwargs["max_nodes"],
+            sampling_kwargs["min_nodes"],
+            sampling_kwargs.get("sampling_seed", seed),
+        )
+        pattern = os.path.join(
+            path,
+            f"{dataset}-*",
+            str(seed),
+            "*",
+            f"range_stats_subset{subset}_samples-channels-in{ch_in:.2f}out{ch_out:.2f}-nodes-in{nod_in:.2f}out{nod_out:.2f}-min{min_nod}-max{max_nod}_seed{samp_seed}_e*.csv",
+        )
+    else:
+        pattern = os.path.join(
+            path, f"{dataset}-*", str(seed), "*", f"range_stats_subset{subset}_e*.csv"
+        )
     file_paths = glob.glob(pattern)
 
     if not file_paths:
-        print("No data files found with the given pattern.")
+        logger.warning("No data files found with the given pattern.")
         return pd.DataFrame()
 
     data_list = []
@@ -62,14 +80,14 @@ def load_and_aggregate_data(path, dataset, seed=0, subset=500):
             continue
 
         try:
-            epoch = filename.split("_e")[-1].replace(".pkl", "")
-            epoch = int(epoch)
+            epoch = int(filename.split("_e")[-1].replace(".csv", ""))
+
         except (IndexError, ValueError):
             print(f"Skipping file with unexpected filename format: {file_path}")
             continue
 
         try:
-            df = pd.read_pickle(file_path)
+            df = pd.read_csv(file_path, index_col=0)
         except Exception as e:
             print(f"Error loading {file_path}: {e}")
             continue

@@ -1,10 +1,13 @@
 import logging
 import os.path as osp
+import copy
 import time
 from functools import partial
+from typing import Optional
 
 import numpy as np
 import torch
+from torch.nn import functional as F
 import torch_geometric.transforms as T
 from numpy.random import default_rng
 from ogb.graphproppred import PygGraphPropPredDataset
@@ -42,12 +45,13 @@ from lrgb_exps.graphgps.transform.transforms import (
 from torch_geometric.data import Data
 from longrange.task_preprocessing import add_distance_attrs
 from ogb.utils.features import get_atom_feature_dims
+from torch_geometric.transforms import BaseTransform
 
 
 def log_loaded_dataset(dataset, format, name):
     logging.info(f"[*] Loaded dataset '{name}' from '{format}':")
     logging.info(f"  {dataset.data}")
-    logging.info(f"  undirected: {dataset[0].is_undirected()}")
+    logging.info(f"  undirected: {dataset.get(0).is_undirected()}")
     logging.info(f"  num graphs: {len(dataset)}")
 
     total_num_nodes = 0
@@ -553,19 +557,69 @@ def convert_x_to_float32(data: Data) -> Data:
     return data
 
 
-def to_one_hot(data: Data) -> Data:
-    """
-    Converts integer input features for Peptides dataset to one-hot so they are differentiable.
-    """
+def map_tensor(
+    data: torch.Tensor, mapping: Optional[dict[int, int]] = None
+) -> torch.Tensor:
+    """Map integer values in a tensor to new values according to a mapping. Used for efficient one-hot encoding."""
+    if not mapping:
+        return data
 
-    feature_dims = get_atom_feature_dims()
-    # x: [num_nodes, len(feature_dims)], integer node features
+    lookup = torch.empty(max(mapping.keys()) + 1, dtype=torch.long).fill_(-1)
+    for k, v in mapping.items():
+        lookup[k] = v
+    return lookup[data]
+
+
+def to_one_hot(data: Data, minimal_size_encodings=True) -> Data:
+    """
+    Convert peptides features to one-hot so they can be used with differentiable embedding module.
+    If minimal_sized_encodings is True, the one-hot encodings are compressed to the minimum required size.
+    By default, peptides features are extremely sparse, with 174 total channels across 9 features, but only
+
+    `mappings` computed using:
+    ```
+    mappings =  {}
+    for i in range(dataset.x.shape[-1]):
+        vals = sorted(int(d) for d in dataset.data.x[:, i].unique())
+        if len(vals) > 1: # ignore features that are always identical - no information
+            mappings[i] = {v: j for j, v in enumerate(vals)}
+    ```
+    """
+    mappings = {
+        0: {0: 0, 5: 1, 6: 2, 7: 3, 15: 4, 16: 5},
+        1: {0: 0, 1: 1, 2: 2},
+        2: {1: 0, 2: 1, 3: 2, 4: 3, 6: 4},
+        3: {4: 0, 5: 1, 6: 2},
+        4: {0: 0, 1: 1, 2: 2, 3: 3, 4: 4},
+        # 5: {0: 0}, # no information
+        6: {1: 0, 2: 1, 3: 2, 4: 3, 5: 4},
+        7: {0: 0, 1: 1},
+        8: {0: 0, 1: 1},
+    }  # mappings for minimal size encodings
+    mappings = (
+        mappings
+        if minimal_size_encodings
+        else {i: None for i in range(data.x.shape[-1])}
+    )
+
     x_cat = []
-    for i, dim in enumerate(feature_dims):
+    for i, map in mappings.items():
         x = data.x[:, i]
-        x = torch.nn.functional.one_hot(x, num_classes=dim).squeeze().float()
+        x = map_tensor(x, map)
+        x = F.one_hot(x, num_classes=len(map)).squeeze().float()
         x_cat.append(x)
     data.x = torch.cat(x_cat, dim=-1)  # -> [num_nodes, sum(feature_dims)], one-hot
+    return data
+
+
+def zinc_to_one_hot(data: Data) -> Data:
+    """
+    Convert ZINC features to one-hot so they can be used with differentiable embedding module.
+    """
+    x = data.x[:, 0]
+    data.x = (
+        F.one_hot(x, num_classes=cfg.dataset.node_encoder_num_types).squeeze().float()
+    )
     return data
 
 
@@ -616,6 +670,13 @@ def preformat_Peptides(dataset_dir, name):
 
     else:
         transform, pre_transform = None, None
+
+    if cfg.dataset.virtual_node:
+        if transform is None:
+            transform = VirtualNode()
+        else:
+            old_transform = transform  # avoid recursion
+            transform = lambda data: VirtualNode()(old_transform(data))
 
     dataset_type = name.split("-")[1]
 
@@ -672,11 +733,32 @@ def preformat_ZINC(dataset_dir, name):
     """
     if name not in ["subset", "full"]:
         raise ValueError(f"Unexpected subset choice for ZINC dataset: {name}")
+
+    if cfg.longrange.track_range_measure:
+        dataset_dir += "+resistance+spd"
+        pre_transform = lambda data: add_distance_attrs(
+            add_distance_attrs(data, "resistance"), "spd"
+        )
+        transform = zinc_to_one_hot
+        if not cfg.dataset.node_encoder_name.startswith("TypeDictNodeDiff"):
+            cfg.dataset.node_encoder_name = cfg.dataset.node_encoder_name.replace(
+                "TypeDictNode", "TypeDictNodeDiff"
+            )
+    else:
+        pre_transform, transform = None, None
+
     dataset = join_dataset_splits(
         [
-            ZINC(root=dataset_dir, subset=(name == "subset"), split=split)
+            ZINC(
+                root=dataset_dir,
+                subset=(name == "subset"),
+                split=split,
+                transform=transform,
+                pre_transform=pre_transform,
+            )
             for split in ["train", "val", "test"]
-        ]
+        ],
+        subset=cfg.longrange.subset,
     )
     return dataset
 
@@ -712,6 +794,11 @@ def preformat_VOCSuperpixels(dataset_dir, name, slic_compactness):
     else:
         pre_transform = None
 
+    if cfg.dataset.virtual_node:
+        transform = VirtualNode()
+    else:
+        transform = None
+
     dataset = join_dataset_splits(
         [
             VOCSuperpixels(
@@ -719,6 +806,7 @@ def preformat_VOCSuperpixels(dataset_dir, name, slic_compactness):
                 name=name,
                 slic_compactness=slic_compactness,
                 split=split,
+                transform=transform,
                 pre_transform=pre_transform,
                 subset=cfg.longrange.subset,
             )
@@ -750,7 +838,7 @@ def preformat_COCOSuperpixels(dataset_dir, name, slic_compactness):
     return dataset
 
 
-def join_dataset_splits(datasets):
+def join_dataset_splits(datasets, subset=0):
     """Join train, val, test datasets into one dataset object.
 
     Args:
@@ -762,6 +850,8 @@ def join_dataset_splits(datasets):
     assert len(datasets) == 3, "Expecting train, val, test datasets"
 
     n1, n2, n3 = len(datasets[0]), len(datasets[1]), len(datasets[2])
+    if subset > 0:
+        n1, n2, n3 = subset, subset, subset
     data_list = (
         [datasets[0].get(i) for i in range(n1)]
         + [datasets[1].get(i) for i in range(n2)]
@@ -779,3 +869,67 @@ def join_dataset_splits(datasets):
     datasets[0].split_idxs = split_idxs
 
     return datasets[0]
+
+
+class VirtualNode(BaseTransform):
+    r"""Appends a virtual node to the given homogeneous graph that is connected
+    to all other nodes, as described in the `"Neural Message Passing for
+    Quantum Chemistry" <https://arxiv.org/abs/1704.01212>`_ paper
+    (functional name: :obj:`virtual_node`).
+    The virtual node serves as a global scratch space that each node both reads
+    from and writes to in every step of message passing.
+    This allows information to travel long distances during the propagation
+    phase.
+
+    Node and edge features of the virtual node are added as zero-filled input
+    features.
+    Furthermore, special edge types will be added both for in-coming and
+    out-going information to and from the virtual node.
+    """
+
+    def __call__(self, data: Data) -> Data:
+        num_nodes, (row, col) = data.num_nodes, data.edge_index
+        edge_type = data.get("edge_type", torch.zeros_like(row))
+
+        arange = torch.arange(num_nodes, device=row.device)
+        full = row.new_full((num_nodes,), num_nodes)
+        row = torch.cat([row, arange, full], dim=0)
+        col = torch.cat([col, full, arange], dim=0)
+        edge_index = torch.stack([row, col], dim=0)
+
+        new_type = edge_type.new_full((num_nodes,), int(edge_type.max()) + 1)
+        edge_type = torch.cat([edge_type, new_type, new_type + 1], dim=0)
+
+        old_data = copy.copy(data)
+        for key, value in old_data.items():
+            if key == "edge_index" or key == "edge_type":
+                continue
+
+            if isinstance(value, torch.Tensor):
+                dim = old_data.__cat_dim__(key, value)
+                size = list(value.size())
+
+                fill_value = None
+                if key == "edge_weight":
+                    size[dim] = 2 * num_nodes
+                    fill_value = 1.0
+                elif key == "batch":
+                    size[dim] = 1
+                    fill_value = int(value[0])
+                elif old_data.is_edge_attr(key):
+                    size[dim] = 2 * num_nodes
+                    fill_value = 0.0
+                elif old_data.is_node_attr(key):
+                    size[dim] = 1
+                    fill_value = 0.0
+
+                if fill_value is not None:
+                    new_value = value.new_full(size, fill_value)
+                    data[key] = torch.cat([value, new_value], dim=dim)
+
+        data.edge_index = edge_index
+        data.edge_type = edge_type
+
+        if "num_nodes" in data:
+            data.num_nodes = old_data.num_nodes + 1
+        return data

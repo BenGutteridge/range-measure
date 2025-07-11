@@ -1,16 +1,23 @@
 from typing import Callable
 import torch
 from torch import Tensor
+from torch import nn
 from torch.nn import Linear, ReLU, BatchNorm1d, Module
 
 from torch_geometric.nn.conv import MessagePassing
 from torch_geometric.nn.conv.gcn_conv import gcn_norm
-from torch_geometric.typing import NoneType  # noqa
 from torch_geometric.typing import (
     Adj,
     OptTensor,
 )
-from torch_geometric.utils import remove_self_loops, add_remaining_self_loops
+from torch_geometric.utils import (
+    remove_self_loops,
+    add_remaining_self_loops,
+    softmax,
+    dense_to_sparse,
+)
+import math
+from torch_scatter import scatter
 
 
 def get_virtualnode_mlp(emb_dim: int) -> Module:
@@ -85,6 +92,51 @@ class WeightedGCNConv(MolConv):
         return out
 
 
+class WeightedGCNConvAct(MolConv):
+    def __init__(self, in_channels: int, out_channels: int, bias: bool, **kwargs):
+        """same as WeightedGCNConv but with GeLU activation function"""
+        kwargs.setdefault("aggr", "add")
+        super().__init__(**kwargs)
+
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.add_self_loops = True
+        self.improved = False
+
+        self.act = torch.nn.GELU()
+
+        self.lin = Linear(in_channels, out_channels, bias=bias)
+
+    def forward(
+        self,
+        x: Tensor,
+        edge_index: Adj,
+        edge_attr: OptTensor = None,
+        edge_weight: OptTensor = None,
+    ) -> Tensor:
+        edge_index = remove_self_loops(edge_index=edge_index)[0]
+        _, edge_attr = add_remaining_self_loops(
+            edge_index, edge_attr, fill_value=1, num_nodes=x.shape[0]
+        )
+
+        # propagate_type: (x: Tensor, edge_weight: OptTensor)
+        edge_index, edge_weight = gcn_norm(  # yapf: disable
+            edge_index,
+            edge_weight,
+            x.size(self.node_dim),
+            self.improved,
+            self.add_self_loops,
+            self.flow,
+            x.dtype,
+        )
+        out = self.propagate(
+            edge_index, x=x, edge_weight=edge_weight, size=None, edge_attr=edge_attr
+        )
+        out = self.lin(out)
+        out = self.act(out)
+        return out
+
+
 # GIN convolution along the graph structure
 # model_type=GIN
 class WeightedGINConv(MolConv):
@@ -153,3 +205,89 @@ class GraphLinear(Linear):
         edge_weight: OptTensor = None,
     ) -> Tensor:
         return super().forward(x)
+
+
+class TransformerAttentionConv(MolConv):
+    """"""
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        num_heads: int = 8,
+        bias: bool = True,
+        dense: bool = False,
+        **kwargs,
+    ):
+        """
+        :param in_channels: Size of each input node feature.
+        :param out_channels: Size of each output per head. The final
+            dimension will be num_heads * out_channels (before the final projection).
+        :param num_heads: Number of attention heads.
+        :param dropout: Dropout probability on the final output.
+        :param bias: Whether to use a bias in linear layers.
+        :param dense: Whether to use dense attention, i.e. replace edge index with a fully connected graph.
+        """
+        # Force "add" aggregation to mimic the sum-based aggregator used in
+        # the original attention logic.
+        kwargs.setdefault("aggr", "add")
+        super().__init__(**kwargs)
+
+        assert in_channels == out_channels, "in_channels must equal out_channels"
+        assert (
+            out_channels % num_heads == 0
+        ), "out_channels must be divisible by num_heads"
+
+        self.dim = in_channels
+        self.num_heads = num_heads
+        self.head_dim = self.dim // num_heads
+        self.dense = dense
+
+        # Define linear transformations for Q, K, and V
+        self.query_lin = nn.Linear(in_channels, self.dim, bias=bias)
+        self.key_lin = nn.Linear(in_channels, self.dim, bias=bias)
+        self.value_lin = nn.Linear(in_channels, self.dim, bias=bias)
+
+        # Final linear after concatenating heads
+        self.out_lin = nn.Linear(self.dim, self.dim, bias=bias)
+
+    def forward(
+        self,
+        x: Tensor,
+        edge_index: Adj,
+        edge_attr: Tensor = None,
+    ) -> Tensor:
+        """
+        :param x: Node features of shape [num_nodes, in_channels].
+        :param edge_index: LongTensor of shape [2, num_edges], defining the graph edges.
+        :param edge_attr: Edge features (optional, not used here).
+        :return: Updated node features [num_nodes, total_dim].
+        """
+        edge_index, _ = add_remaining_self_loops(
+            edge_index, edge_attr, fill_value=1, num_nodes=x.shape[0]
+        )
+        if self.dense:
+            edge_index = dense_to_sparse(torch.ones([x.shape[0], x.shape[0]]))[0].to(
+                x.device
+            )
+
+        # Project to Q, K, V
+        Q = self.query_lin(x).view(
+            -1, self.num_heads, self.head_dim
+        )  # [N, heads, head_dim]
+        K = self.key_lin(x).view(-1, self.num_heads, self.head_dim)
+        V = self.value_lin(x).view(-1, self.num_heads, self.head_dim)
+
+        # Compute attention scores
+        alpha = (Q[edge_index[0]] * K[edge_index[1]]).sum(dim=-1)  # [E, heads]
+        alpha = alpha / math.sqrt(self.head_dim)
+        alpha = softmax(alpha, edge_index[1])
+
+        # Compute messages and aggregate
+        message = alpha.unsqueeze(-1) * V[edge_index[0]]
+        out = scatter(message, edge_index[1], dim=0, reduce="sum")
+
+        out = out.view(-1, self.dim)
+        out = self.out_lin(out)
+
+        return out

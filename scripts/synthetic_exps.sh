@@ -3,33 +3,33 @@
 # All commands for running synthetic tasks
 
 # ------- Compute task ranges for *node-level* synthetic tasks (Figure 2) ------------------------------------------------------------
-python main.py --dataset sbm --skip --num_layers 1 --lr_exp --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn opp_lin --track_range --max_epochs 2
-python main.py --dataset sbmsparse --skip --num_layers 1 --lr_exp --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn opp_lin --track_range --max_epochs 2
-python main.py --dataset erdos --skip --num_layers 1 --lr_exp --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn opp_lin --track_range --max_epochs 2
-python main.py --dataset erdossparse --skip --num_layers 1 --lr_exp --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn opp_lin --track_range --max_epochs 2
-python main.py --dataset ba --skip --num_layers 1 --lr_exp --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn opp_lin --track_range --max_epochs 2
-python main.py --dataset linegraphs --skip --num_layers 1 --lr_exp --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn opp_lin --track_range --max_epochs 2
-python main.py --dataset gridgraphs --skip --num_layers 1 --lr_exp --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn opp_lin --track_range --max_epochs 2
+python main.py --dataset sbm --skip --num_layers 1  --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn opp_lin --track_range --max_epochs 2
+python main.py --dataset sbmsparse --skip --num_layers 1  --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn opp_lin --track_range --max_epochs 2
+python main.py --dataset erdos --skip --num_layers 1  --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn opp_lin --track_range --max_epochs 2
+python main.py --dataset erdossparse --skip --num_layers 1  --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn opp_lin --track_range --max_epochs 2
+python main.py --dataset ba --skip --num_layers 1  --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn opp_lin --track_range --max_epochs 2
+python main.py --dataset linegraphs --skip --num_layers 1  --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn opp_lin --track_range --max_epochs 2
+python main.py --dataset gridgraphs --skip --num_layers 1  --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn opp_lin --track_range --max_epochs 2
 
 
 # ------- Compute task ranges for *graph-level* synthetic tasks, using *Hessian* -------------------------------------------
-python main.py --dataset sbm_graph --skip --num_layers 1 --lr_exp --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 2 --pool MEAN
-python main.py --dataset sbmsparse_graph --skip --num_layers 1 --lr_exp --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 2 --pool MEAN
-python main.py --dataset erdos_graph --skip --num_layers 1 --lr_exp --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 2 --pool MEAN
-python main.py --dataset erdossparse_graph --skip --num_layers 1 --lr_exp --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 2 --pool MEAN
-python main.py --dataset ba_graph --skip --num_layers 1 --lr_exp --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 2 --pool MEAN
-python main.py --dataset linegraphs_graph --skip --num_layers 1 --lr_exp --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 2 --pool MEAN
-python main.py --dataset gridgraphs_graph --skip --num_layers 1 --lr_exp --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 2 --pool MEAN
+python main.py --dataset sbm_graph --skip --num_layers 1  --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 2 --pool MEAN
+python main.py --dataset sbmsparse_graph --skip --num_layers 1  --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 2 --pool MEAN
+python main.py --dataset erdos_graph --skip --num_layers 1  --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 2 --pool MEAN
+python main.py --dataset erdossparse_graph --skip --num_layers 1  --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 2 --pool MEAN
+python main.py --dataset ba_graph --skip --num_layers 1  --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 2 --pool MEAN
+python main.py --dataset linegraphs_graph --skip --num_layers 1  --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 2 --pool MEAN
+python main.py --dataset gridgraphs_graph --skip --num_layers 1  --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 2 --pool MEAN
 
 
 # ------- Compute task ranges for *graph-level* synthetic tasks (as above), instead using *final layer Jacobian* ------------
-python main.py --dataset sbm_graph --skip --num_layers 1 --lr_exp --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 2 --pool MEAN  --use_jacobian
-python main.py --dataset sbmsparse_graph --skip --num_layers 1 --lr_exp --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 2 --pool MEAN --use_jacobian
-python main.py --dataset erdos_graph --skip --num_layers 1 --lr_exp --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 2 --pool MEAN --use_jacobian
-python main.py --dataset erdossparse_graph --skip --num_layers 1 --lr_exp --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 2 --pool MEAN --use_jacobian
-python main.py --dataset ba_graph --skip --num_layers 1 --lr_exp --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 2 --pool MEAN --use_jacobian
-python main.py --dataset linegraphs_graph --skip --num_layers 1 --lr_exp --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 2 --pool MEAN --use_jacobian
-python main.py --dataset gridgraphs_graph --skip --num_layers 1 --lr_exp --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 2 --pool MEAN --use_jacobian
+python main.py --dataset sbm_graph --skip --num_layers 1  --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 2 --pool MEAN  --use_jacobian
+python main.py --dataset sbmsparse_graph --skip --num_layers 1  --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 2 --pool MEAN --use_jacobian
+python main.py --dataset erdos_graph --skip --num_layers 1  --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 2 --pool MEAN --use_jacobian
+python main.py --dataset erdossparse_graph --skip --num_layers 1  --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 2 --pool MEAN --use_jacobian
+python main.py --dataset ba_graph --skip --num_layers 1  --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 2 --pool MEAN --use_jacobian
+python main.py --dataset linegraphs_graph --skip --num_layers 1  --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 2 --pool MEAN --use_jacobian
+python main.py --dataset gridgraphs_graph --skip --num_layers 1  --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 2 --pool MEAN --use_jacobian
 
 
 # ------- Node-level linegraph exp for every depth of GCN and 4 seeds, for power task with k=5 (Figure 4)---------------------------
@@ -37,9 +37,10 @@ depth_ls=$(seq 1 8)
 seed_ls=$(seq 1 4)
 for i in $depth_ls; do
   for seed in $seed_ls; do
-    python main.py --dataset linegraphs --skip --num_layers $i --seed $seed --lr_exp --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn opp_lin --track_range --max_epochs 20
+    python main.py --dataset linegraphs --skip --num_layers $i --seed $seed  --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn opp_lin --track_range --max_epochs 20
   done
 done
+
 
 
 # ------- Graph-level linegraph exp for every depth of GCN and 4 seeds, for power task with k=5 (Figure 5)---------------------------
@@ -48,8 +49,31 @@ depth_ls=$(seq 1 8)
 seed_ls=$(seq 1 4)
 for i in $depth_ls; do
   for seed in $seed_ls; do
-    python main.py --dataset linegraphs_graph --skip --num_layers $i --seed $seed --lr_exp --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 50 --pool MEAN
-    python main.py --dataset linegraphs_graph --skip --num_layers $i --seed $seed --lr_exp --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 50 --pool MEAN --use_jacobian
+    python main.py --dataset linegraphs_graph --skip --num_layers $i --seed $seed  --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 50 --pool MEAN
+    python main.py --dataset linegraphs_graph --skip --num_layers $i --seed $seed  --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 50 --pool MEAN --use_jacobian
+  done
+done
+
+# ------- Node-level linegraph exp for every depth of GCN+virtual node and GCN with activation and 4 seeds, for power task with k=5 (Figure 13a and 14a)---------------------------
+depth_ls=$(seq 1 8)
+seed_ls=$(seq 1 4)
+for i in $depth_ls; do
+  for seed in $seed_ls; do
+    python main.py --dataset linegraphs --skip --num_layers $i --seed $seed  --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn opp_lin --track_range --max_epochs 20  --virtual_node
+    python main.py --dataset linegraphs --skip --num_layers $i --seed $seed  --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn opp_lin --track_range --max_epochs 20  --model_type GCNACT
+  done
+done
+
+# ------- Graph-level linegraph exp for every depth of GCN+virtual node and GCN with activation and 4 seeds, for power task with k=5 (Figure 13b and 14b)---------------------------
+# Both for Hessian and for final layer Jacobian
+depth_ls=$(seq 1 8)
+seed_ls=$(seq 1 4)
+for i in $depth_ls; do
+  for seed in $seed_ls; do
+    python main.py --dataset linegraphs_graph --skip --num_layers $i --seed $seed  --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 50 --pool MEAN --virtual_node
+    python main.py --dataset linegraphs_graph --skip --num_layers $i --seed $seed  --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 50 --pool MEAN --virtual_node --use_jacobian
+    python main.py --dataset linegraphs_graph --skip --num_layers $i --seed $seed  --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 50 --pool MEAN --model_type GCNACT
+    python main.py --dataset linegraphs_graph --skip --num_layers $i --seed $seed  --distance_fn adjacency_self_loop_power_sym_5 --interaction_fn L2_norm --track_range --max_epochs 50 --pool MEAN --model_type GCNACT --use_jacobian
   done
 done
 
@@ -62,7 +86,7 @@ for distance in $distance_ls; do
   for k in $k_ls; do
     for seed in $seed_ls; do
       distance_fn="${distance}_${k}"  # Concatenate integer to string
-      python main.py --dataset gridgraphs --skip --num_layers 5 --seed $seed --lr_exp --distance_fn $distance_fn --interaction_fn opp_lin --track_range --max_epochs 20
+      python main.py --dataset gridgraphs --skip --num_layers 5 --seed $seed  --distance_fn $distance_fn --interaction_fn opp_lin --track_range --max_epochs 20
     done
   done
 done
@@ -77,8 +101,8 @@ for distance in $distance_ls; do
   for k in $k_ls; do
     for seed in $seed_ls; do
       distance_fn="${distance}_${k}"  # Concatenate integer to string
-      python main.py --dataset gridgraphs_graph --skip --num_layers 5 --seed $seed --lr_exp --distance_fn $distance_fn --interaction_fn opp_lin --track_range --max_epochs 20 --pool MEAN
-      python main.py --dataset gridgraphs_graph --skip --num_layers 5 --seed $seed --lr_exp --distance_fn $distance_fn --interaction_fn opp_lin --track_range --max_epochs 20 --pool MEAN --use_jacobian
+      python main.py --dataset gridgraphs_graph --skip --num_layers 5 --seed $seed  --distance_fn $distance_fn --interaction_fn opp_lin --track_range --max_epochs 20 --pool MEAN
+      python main.py --dataset gridgraphs_graph --skip --num_layers 5 --seed $seed  --distance_fn $distance_fn --interaction_fn opp_lin --track_range --max_epochs 20 --pool MEAN --use_jacobian
     done
   done
 done

@@ -1,8 +1,12 @@
 import logging
-
+import pickle
 import torch
 from torch_geometric.utils import subgraph
 from tqdm import tqdm
+import os
+from os.path import join
+from loguru import logger
+import time
 
 
 def pre_transform_in_memory(dataset, transform_func, show_progress=False):
@@ -24,17 +28,99 @@ def pre_transform_in_memory(dataset, transform_func, show_progress=False):
     if transform_func is None:
         return dataset
 
-    data_list = [
-        transform_func(dataset.get(i))
-        for i in tqdm(
-            range(len(dataset)),
-            disable=not show_progress,
-            mininterval=10,
-            miniters=len(dataset) // 20,
-        )
-    ]
-    data_list = list(filter(None, data_list))
+    # Check for positional encoding stats
+    args = transform_func.keywords
+    pe_strs = args.get("pe_types", [])
+    posenc_filepath = join(
+        args["cfg"].dataset.dir,
+        f"{args['cfg'].dataset.format}-{args['cfg'].dataset.name}_{'-'.join(pe_strs)}_{transform_func.func.__name__}.pkl",
+    )  # if not a positional encoding transform, will be an unused dummy filename
+    if (
+        args["cfg"].dataset.format in ["PyG-VOCSuperpixels", "PyG-ZINC"]
+        and args["cfg"].longrange.subset > 0
+    ):
+        posenc_filepath = posenc_filepath.replace(
+            ".pkl", f"_subset{args['cfg'].longrange.subset}.pkl"
+        )  # VOC subset changes the Dataset object directly, so we need a separate pos enc for each subset
 
+    # Load saved positional encoding stats and add to dataset
+    if os.path.exists(posenc_filepath):
+        logging.info(f"Loading positional encoding stats from {posenc_filepath}...")
+        with open(posenc_filepath, "rb") as f:
+            pos_enc = pickle.load(f)
+
+        if pe_strs == ["RWSE"]:
+            pos_enc_rwse = pos_enc["RWSE"]
+
+            def add_rwse(data, rwse):
+                data.pestat_RWSE = rwse
+                return data
+
+            t0 = time.time()
+            data_list = [
+                add_rwse(dataset.get(i), pos_enc_rwse[i])
+                for i in tqdm(
+                    range(len(dataset)),
+                    disable=not show_progress,
+                    mininterval=10,
+                    miniters=len(dataset) // 20,
+                )
+            ]
+        elif pe_strs == ["LapPE"]:
+
+            def add_lappe(data, eigvals, eigvecs):
+                data.EigVals = eigvals
+                data.EigVecs = eigvecs
+                return data
+
+            t0 = time.time()
+            data_list = [
+                add_lappe(dataset.get(i), pos_enc["EigVals"][i], pos_enc["EigVecs"][i])
+                for i in tqdm(
+                    range(len(dataset)),
+                    disable=not show_progress,
+                    mininterval=10,
+                    miniters=len(dataset) // 20,
+                )
+            ]
+        logging.info("...done.")
+        logging.info(
+            f"Appended {len(data_list)} saved examples in {(time.time() - t0):.2f}s"
+        )
+
+    else:
+        t0 = time.time()
+        data_list = [
+            transform_func(dataset.get(i))
+            for i in tqdm(
+                range(len(dataset)),
+                disable=not show_progress,
+                mininterval=10,
+                miniters=len(dataset) // 20,
+            )
+        ]
+        logger.info(
+            f"Performed {transform_func.func.__name__} transform for {len(data_list)} examples in {(time.time() - t0):.2f}s"
+        )
+        # Extract and save pos_enc stats
+        pos_enc = {}
+        for pe_str in pe_strs:
+            logging.info(
+                f"Saving {pe_str} positional encoding stats to {posenc_filepath}..."
+            )
+            for d in data_list:
+                if pe_str == "RWSE":
+                    pos_enc["RWSE"] = pos_enc.get("RWSE", []) + [d.pestat_RWSE]
+                elif pe_str == "LapPE":
+                    pos_enc["EigVals"] = pos_enc.get("EigVals", []) + [d.EigVals]
+                    pos_enc["EigVecs"] = pos_enc.get("EigVecs", []) + [d.EigVecs]
+                else:
+                    raise NotImplementedError(f"{pe_str} not supported.")
+        if pos_enc:
+            with open(posenc_filepath, "wb") as f:
+                pickle.dump(pos_enc, f)
+            logging.info("...done.")
+    data_list = list(filter(None, data_list))
     dataset._indices = None
     dataset._data_list = data_list
     dataset.data, dataset.slices = dataset.collate(data_list)

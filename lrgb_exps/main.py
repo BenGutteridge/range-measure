@@ -2,6 +2,9 @@ import datetime
 import os
 import torch
 import logging
+import cProfile
+import pstats
+import io
 
 # import lrgb_exps.graphgps  # noqa, register custom modules
 from lrgb_exps.graphgps.agg_runs import agg_runs
@@ -76,6 +79,8 @@ def custom_set_out_dir(cfg, cfg_fname, name_tag):
     """
     run_name = os.path.splitext(os.path.basename(cfg_fname))[0]
     run_name += f"-{name_tag}" if name_tag else ""
+    if cfg.dataset.virtual_node and "+VN" not in run_name:
+        run_name += "+VN"
     cfg.out_dir = os.path.join(cfg.out_dir, run_name)
 
 
@@ -132,6 +137,11 @@ def run_loop_settings():
 
 
 if __name__ == "__main__":
+    # Create a profiler instance
+    profiler = cProfile.Profile()
+    profiler.enable()
+
+    # Begin main execution
     # Load cmd line args
     args = parse_args()
     # Load config file
@@ -160,6 +170,9 @@ if __name__ == "__main__":
         logging.info(f"    Starting now: {datetime.datetime.now()}")
         # Set machine learning pipeline
         loaders = create_loader()
+        # cfg.share.dim_out can be incorrect if cfg.longrange.subset is used for VOCSuperpixels
+        if cfg.dataset.format == "PyG-VOCSuperpixels":
+            cfg.share.dim_out = 21
         loggers = create_logger()
         model = create_model()
         if cfg.pretrained.dir:
@@ -197,3 +210,13 @@ if __name__ == "__main__":
     if args.mark_done:
         os.rename(args.cfg_file, f"{args.cfg_file}_done")
     logging.info(f"[*] All done: {datetime.datetime.now()}")
+    # End main execution
+
+    # Stop profiling and save results
+    profiler.disable()
+    stream = io.StringIO()
+    stats = pstats.Stats(profiler, stream=stream).sort_stats("cumulative")
+    # Save the profiling results to a file for further analysis with snakeviz:
+    profiler.dump_stats(
+        f"cprofile/profile_{datetime.datetime.now().strftime('%m-%d_%H-%M')}.prof"
+    )

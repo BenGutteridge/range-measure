@@ -1,10 +1,11 @@
 # On Measuring Long-Range Interactions in Graph Neural Networks
 
-Repo containing experiments from the paper "On Measuring Long-Range Interactions in Graph Neural Networks", accepted to ICML 2025.
+![Description](misc/Banner_fig.png)
 
-Code adapted from from [1] and [2].
+Official Repository for the ICML 2025 paper ["On Measuring Long-Range Interactions in Graph Neural Networks"](https://arxiv.org/abs/2506.05971), which formalises and analyses the existence of long-range interactions by in Graph Neural Networks and their respective benchmarks, through a novel **range measure**.
 
-**N.B. this repo is a *work-in-progress*, updated code coming soon.**
+Based on code from [1] and [2].
+
 
 ### Setup
 ```bash
@@ -46,7 +47,20 @@ You will likely have to tweak the above for your configuration.
 
 **N.B.** the important args for LRGB experiments are those described in `lrgb_exps/graphgps/config/longrange.py` (especially `longrange.track_range_measure True`, which ensures that dataset features required for calculating the range are computed) and `train.mode eval_range`, which switches from default model *training* to range calculation once model state checkpoints have been saved.
 
+# Additional datasets
+- Cora -> [scripts/camera-ready/cora.sh](scripts/camera-ready/cora.sh)
+  
 
+# Citing this paper
+If you utilised our code for your work or project please consider citing our paper: 
+
+```bibtex:
+@inproceedings{bambergermeasuring,
+  title={On Measuring Long-Range Interactions in Graph Neural Networks},
+  author={Bamberger, Jacob and Gutteridge, Benjamin and le Roux, Scott and Bronstein, Michael M and Dong, Xiaowen},
+  booktitle={Forty-second International Conference on Machine Learning}
+}
+```
 # References
 [1] https://github.com/benfinkelshtein/CoGNN
 

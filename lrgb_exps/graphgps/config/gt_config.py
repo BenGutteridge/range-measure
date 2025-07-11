@@ -46,6 +46,9 @@ def set_cfg_gt(cfg):
 
     cfg.gt.batch_norm = True
 
+    cfg.gt.bn_momentum = 0.1  # 0.01
+    cfg.gt.bn_no_runner = False
+
     cfg.gt.residual = True
 
     # BigBird model/GPS-BigBird layer.
@@ -72,3 +75,19 @@ def set_cfg_gt(cfg):
     cfg.gt.bigbird.layer_norm_eps = 1e-6
 
     cfg.gt.vn_pooling = "mean"
+
+    # Extras for GRIT
+    cfg.gt.update_e = True
+    cfg.gt.attn = CN()
+    cfg.gt.attn.use = True
+    cfg.gt.attn.sparse = False
+    cfg.gt.attn.deg_scaler = True
+    cfg.gt.attn.use_bias = False
+    cfg.gt.attn.clamp = 5.0
+    cfg.gt.attn.act = "relu"
+    cfg.gt.attn.full_attn = True
+    cfg.gt.attn.norm_e = True
+    cfg.gt.attn.O_e = True
+    cfg.gt.attn.edge_enhance = True
+    cfg.gt.attn.signed_sqrt = False
+    cfg.gt.attn.fwl = False

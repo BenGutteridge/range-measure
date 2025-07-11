@@ -1,7 +1,14 @@
 """
-Generates bash scripts and/or slurm scripts for running LRGB experiments.
-You may have to change slurm commands and other params based on your configuration.
+Updated script for generating bash/slurm scripts for LRGB experiments.
+Now, commands across all seeds for a given config (and subset/split) are merged
+and chunked into parallel groups of size num_parallel.
 """
+
+import argparse
+import shutil
+import os
+import math
+from collections import defaultdict
 
 # =============================================================================
 # User Configurable Parameters
@@ -9,57 +16,107 @@ You may have to change slurm commands and other params based on your configurati
 
 # List of configuration file paths.
 cfg_paths = [
-    ## Corresponds to Figure 6 in the paper
-    "configs/LRGB-tuned/vocsuperpixels-GatedGCN.yaml",
-    "configs/LRGB-tuned/vocsuperpixels-GINE.yaml",
-    "configs/LRGB-tuned/vocsuperpixels-GCN.yaml",
+    # Corresponds to Figure 6 in the paper
+    # "configs/LRGB-tuned/vocsuperpixels-GCN.yaml",
+    # "configs/LRGB-tuned/vocsuperpixels-GatedGCN.yaml",
+    # "configs/LRGB-tuned/vocsuperpixels-GINE.yaml",
     "configs/LRGB-tuned/vocsuperpixels-GPS.yaml",
-    ## Corresponds to Figure 7 in the paper
-    "configs/LRGB-tuned/peptides-func-GCN.yaml",
-    "configs/LRGB-tuned/peptides-func-GINE.yaml",
-    "configs/LRGB-tuned/peptides-func-GatedGCN.yaml",
+    "configs/LRGB-tuned/vocsuperpixels-Transformer.yaml",
+    # "configs/LRGB-tuned/vocsuperpixels-GCN+VN.yaml",
+    # Corresponds to Figure 7 in the paper
+    # "configs/LRGB-tuned/peptides-func-GCN.yaml",
+    # "configs/LRGB-tuned/peptides-func-GatedGCN.yaml",
+    # "configs/LRGB-tuned/peptides-func-GINE.yaml",
     "configs/LRGB-tuned/peptides-func-GPS.yaml",
-    "configs/LRGB-tuned/peptides-struct-GCN.yaml",
-    "configs/LRGB-tuned/peptides-struct-GINE.yaml",
-    "configs/LRGB-tuned/peptides-struct-GatedGCN.yaml",
+    "configs/LRGB-tuned/peptides-func-Transformer.yaml",
+    # "configs/LRGB-tuned/peptides-func-GCN+VN.yaml",
+    # "configs/LRGB-tuned/peptides-struct-GCN.yaml",
+    # "configs/LRGB-tuned/peptides-struct-GatedGCN.yaml",
+    # "configs/LRGB-tuned/peptides-struct-GINE.yaml",
     "configs/LRGB-tuned/peptides-struct-GPS.yaml",
+    "configs/LRGB-tuned/peptides-struct-Transformer.yaml",
+    # "configs/LRGB-tuned/peptides-struct-GCN+VN.yaml",
 ]
 
 # Experiment hyperparameters
-seeds = [0]  # Example seed values
+seeds = [0, 1, 2, 3]  # All seeds will be merged across a given config.
 split_strings = ["val"]  # Data splits to use
-qos = "medium"  # Quality-of-service level (short, medium, long)
-every_n_epochs = 20  # Step size for selecting epochs
-num_parallel = 8  # Number of parallel commands per generated script
+qos = "short"  # Quality-of-service level (short, medium, long)
+num_parallel = 1  # Number of parallel commands per generated script
+use_h100 = False
 
+# Step size for selecting epochs (per dataset)
+every_n_epochs = {
+    "peptides-func": 20,
+    "peptides-struct": 20,
+    "vocsuperpixels": 20,
+}
+
+# Total epochs per dataset
 dataset_total_epochs = {
-    "vocsuperpixels": 200,
     "peptides-func": 250,
     "peptides-struct": 250,
-}  # total number of epochs for each dataset
+    "vocsuperpixels": 200,
+}
+
+# Subset sizes to evaluate (change as needed)
 dataset_subsets = {
-    "vocsuperpixels": [500],
     "peptides-func": [200],
     "peptides-struct": [200],
-}  # number of graphs to evaluate per split. Use -1 for full set
+    "vocsuperpixels": [500],
+}
+
+# Sampling probabilities (per dataset)
+sampling_probs = {
+    "peptides-func": {
+        "in_channel": 0.5,
+        "in_node": 1.0,
+        "out_channel": 0.5,
+        "out_node": 0.5,
+    },
+    "peptides-struct": {
+        "in_channel": 0.5,
+        "in_node": 1.0,
+        "out_channel": 0.5,
+        "out_node": 0.5,
+    },
+    "vocsuperpixels": {
+        "in_channel": 0.5,
+        "in_node": 1.0,
+        "out_channel": 0.5,
+        "out_node": 0.5,
+    },
+}
 
 # Directories for outputs (change these if needed)
-run_dir = "results/sota"  # Output directory for experiment results
-scripts_output_dir = "scripts/slurm"  # Directory for generated slurm scripts
-logs_base_dir = "slurm_logs/sota_ranges"  # Base directory for log files
-bash_scripts_dir = "scripts/bash"  # Directory for plain bash scripts
-
+exp_set_name = ""  # Name of the experiment set
+run_dir = "results/camera_ready"  # Output directory for experiment results
+scripts_output_dir = os.path.join("scripts/slurm", exp_set_name)  # Directory for generated slurm scripts
+logs_base_dir = os.path.join("slurm_logs/camera_ready", exp_set_name)  # Base directory for log files
+bash_scripts_dir = os.path.join("scripts/bash", exp_set_name)  # Directory for generated bash scripts
 
 # =============================================================================
 # Internal Constants, Mappings, and Templates
 # =============================================================================
 
-# Mapping dictionaries for abbreviations (less likely to change)
-dataset_mapping = {"vocsuperpixels": "V", "peptides-func": "F", "peptides-struct": "S"}
-model_mapping = {"GCN": "G", "GatedGCN": "GG", "GINE": "GI", "GPS": "GP"}
-split_mapping = {"train": "tr", "val": "va", "test": "te"}
-
-# Compute short qos code str.
+# Mapping dictionaries for abbreviations
+dataset_mapping = {
+    "vocsuperpixels": "V",
+    "peptides-func": "F",
+    "peptides-struct": "S",
+    "zinc": "Z",
+}
+model_mapping = {
+    "GCN": "GC",
+    "GatedGCN": "GG",
+    "GINE": "GI",
+    "GPS": "GP",
+    "GPS+RWSE": "GP",
+    "GINE+RWSE": "GI",
+    "GCN+VN": "GV",
+    "Transformer": "GT",
+}
+split_mapping = {"train": "tr", "val": "", "test": "te"}
 qos_short = {"short": "sh", "medium": "me", "long": "lo"}[qos]
 
 # Slurm Script Template (if using slurm)
@@ -69,36 +126,32 @@ slurm_template = """#!/bin/bash
 #SBATCH --qos={qos}
 #SBATCH --gres=gpu:1
 #SBATCH --mem-per-cpu=10G
-#SBATCH --cpus-per-task=16
-# #SBATCH --partition=h100
+#SBATCH --cpus-per-task=8
+#SBATCH --partition=h100
 
 source /slurm-storage/miniconda3/etc/profile.d/conda.sh
-conda activate longrange
+conda activate longrange_copy
 cd lrgb_exps
 
 {commands}
 
 wait
 """
-
+if not use_h100:
+    slurm_template = slurm_template.replace("#SBATCH --partition=h100\n", "\n")
 
 # =============================================================================
 # Helper Functions
 # =============================================================================
-import itertools
-import math
-from collections import defaultdict
-
 
 def sanitize(string):
     """Sanitize a string to include only alphanumerics, hyphens, and underscores."""
     return "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in string)
 
-
 def parse_cfg_filename(cfg_path):
     """
     Extract dataset and model names from the configuration filename.
-    E.g., "vocsuperpixels-GCN.yaml" -> ("vocsuperpixels", "GCN")
+    E.g., "peptides-func-GCN.yaml" -> ("peptides-func", "GCN")
     """
     filename = os.path.splitext(os.path.basename(cfg_path))[0]
     parts = filename.rsplit("-", 1)
@@ -109,33 +162,24 @@ def parse_cfg_filename(cfg_path):
         model = "UnknownModel"
     return dataset, model
 
-
-def map_abbreviations(dataset, model, split, subset, seed):
+def map_abbreviations_no_seed(dataset, model, split):
     """
-    Map full names to their respective abbreviations for a job name.
+    Create a job name abbreviation that does not include seed information.
     """
     dataset_abbr = dataset_mapping.get(dataset, "U")
     if dataset_abbr == "U":
-        print(
-            f"Warning: Dataset '{dataset}' not recognized. Using 'U' as abbreviation."
-        )
+        print(f"Warning: Dataset '{dataset}' not recognized. Using 'U' as abbreviation.")
     model_abbr = model_mapping.get(model, "U")
     if model_abbr == "U":
         print(f"Warning: Model '{model}' not recognized. Using 'U' as abbreviation.")
     split_abbr = split_mapping.get(split, "U")
     if split_abbr == "U":
         print(f"Warning: Split '{split}' not recognized. Using 'U' as abbreviation.")
-    subset_abbr = f"S{subset}" if subset != -1 else ""
-    seed_abbr = f"s{seed}"
     job_name = f"{dataset_abbr}{model_abbr}{split_abbr}"
-    if subset_abbr:
-        job_name += subset_abbr
-    job_name += seed_abbr
     return job_name
 
-
-def get_command(cfg, seed, subset, split, epoch, log_dir, run_dir):
-    """Return a command string for a given epoch."""
+def get_command(cfg, seed, subset, split, epoch, log_dir, run_dir, sampling_probs):
+    """Return a command string for a given (seed, epoch) combination."""
     cmd = (
         f'python main.py --cfg "{cfg}" \\\n'
         f"    longrange.track_range_measure True \\\n"
@@ -149,92 +193,76 @@ def get_command(cfg, seed, subset, split, epoch, log_dir, run_dir):
         f"    longrange.subset {subset} \\\n"
         f"    longrange.split {split} \\\n"
         f"    longrange.epoch {epoch} \\\n"
-        f"    > ../{log_dir}/epoch{epoch}.out 2>&1 &\n"
+        f"    longrange.in_channel_prob {sampling_probs['in_channel']} \\\n"
+        f"    longrange.in_node_prob {sampling_probs['in_node']} \\\n"
+        f"    longrange.out_channel_prob {sampling_probs['out_channel']} \\\n"
+        f"    longrange.out_node_prob {sampling_probs['out_node']} \\\n"
+        f"    longrange.sampling_seed {seed} \\\n"
+        f'    > "../{log_dir}/${{SLURM_JOB_ID}}_e{epoch:03d}.out" 2>&1 &\n'
     )
     return cmd
 
-
 # =============================================================================
-# Job Generation (Common)
+# Job Generation (Modified to Parallelize Across Seeds)
 # =============================================================================
 def generate_jobs():
     """
-    Build a list of job dictionaries. Each job corresponds to a chunk of epochs
-    (up to num_parallel commands) for a given (cfg, seed, subset, split) grouping.
+    Build a list of job dictionaries. Each job now corresponds to a chunk of commands
+    (up to num_parallel commands) for a given (cfg, subset, split) grouping, where the commands
+    span all seeds and their respective epochs.
     """
-    tasks = []
-    # Generate individual tasks for each combination.
-    for cfg, seed, split in itertools.product(cfg_paths, seeds, split_strings):
+    tasks_by_config = defaultdict(list)
+    # Generate tasks for each configuration grouping (cfg, subset, split)
+    for cfg in cfg_paths:
         dataset, model = parse_cfg_filename(cfg)
         subsets = dataset_subsets[dataset]
-        for subset in subsets:
-            n_epochs = dataset_total_epochs.get(dataset, 200)
-            if dataset not in dataset_total_epochs:
-                print(
-                    f"Warning: n_epochs for dataset '{dataset}' not defined. Using default n_epochs=200."
-                )
-            # Select epochs: initial ones, steps of every_n_epochs, and the final epoch.
-            task_epochs = set([0, 1, 4])
-            task_epochs.update(range(0, n_epochs, every_n_epochs))
-            task_epochs.add(n_epochs - 1)
-            sorted_epochs = sorted(task_epochs)
-            for epoch in sorted_epochs:
-                tasks.append((cfg, seed, subset, split, epoch, dataset, model))
-
-    # Sort tasks to group them nicely.
-    tasks_sorted = sorted(
-        tasks,
-        key=lambda s: (
-            s[3],  # split
-            model_mapping.get(s[6], ""),  # model (s[6])
-            dataset_mapping.get(s[5], ""),  # dataset (s[5])
-            s[0],  # cfg_path
-            s[1],  # seed
-            s[2],  # subset
-            s[4],  # epoch
-        ),
-    )
-
-    # Group tasks by (cfg, seed, subset, split)
-    grouped_tasks = defaultdict(list)
-    for task in tasks_sorted:
-        cfg, seed, subset, split, epoch, dataset, model = task
-        key = (cfg, seed, subset, split)
-        grouped_tasks[key].append(epoch)
-
-    # Create job entries by splitting epochs into chunks of size num_parallel.
+        for split in split_strings:
+            for subset in subsets:
+                for seed in seeds:
+                    n_epochs = dataset_total_epochs.get(dataset, 200)
+                    if dataset not in dataset_total_epochs:
+                        print(f"Warning: n_epochs for dataset '{dataset}' not defined. Using default n_epochs=200.")
+                    # Select epochs: initial ones, steps of every_n_epochs, and the final epoch.
+                    task_epochs = set([-1, 0, 1, 2, 4])
+                    task_epochs.update(range(0, n_epochs, every_n_epochs.get(dataset, 20)))
+                    task_epochs.add(n_epochs - 1)
+                    sorted_epochs = sorted(task_epochs)
+                    for epoch in sorted_epochs:                       
+                        range_stats_path = (
+                            f"lrgb_exps/{run_dir}/{dataset}-{model}/{seed}/{split}/range_stats_subset{subset}_samples"
+                            f"-channels-in{sampling_probs[dataset]['in_channel']:.2f}out{sampling_probs[dataset]['out_channel']:.2f}-nodes-in{sampling_probs[dataset]['in_node']:.2f}out{sampling_probs[dataset]['out_node']:.2f}"
+                            f"-min16-max256_seed{seed}_e{epoch:03d}.csv"
+                        )
+                        # Don't bother for tasks that have been completed already
+                        if not os.path.exists(range_stats_path):
+                            tasks_by_config[(cfg, subset, split)].append((seed, epoch))
+    
     jobs = []
-    for key, epochs in grouped_tasks.items():
-        cfg, seed, subset, split = key
+    # For each configuration grouping, chunk the tasks into groups of num_parallel commands.
+    for (cfg, subset, split), task_list in tasks_by_config.items():
         dataset, model = parse_cfg_filename(cfg)
-        # Create a base job name.
-        job_base_name = map_abbreviations(dataset, model, split, subset, seed)
-        job_base_name = sanitize(job_base_name)
-        epochs_sorted = sorted(epochs)
-        num_chunks = math.ceil(len(epochs_sorted) / num_parallel)
+        # Sort tasks first by seed then by epoch.
+        task_list.sort(key=lambda x: (x[0], x[1]))
+        num_chunks = math.ceil(len(task_list) / num_parallel)
+        base_job_name = sanitize(map_abbreviations_no_seed(dataset, model, split))
         for i in range(num_chunks):
-            chunk_epochs = epochs_sorted[i * num_parallel : (i + 1) * num_parallel]
-            # Create a unique job name using a hyphen-separated list of epochs.
-            epoch_str = "e" + "-".join(f"{epoch:03d}" for epoch in chunk_epochs)
-            job_name = f"{job_base_name}_{epoch_str}"
-            job_name = sanitize(job_name)
-            # Define the log directory.
-            log_dir = os.path.join(logs_base_dir, job_name)
-            os.makedirs(log_dir, exist_ok=True)
+            chunk_tasks = task_list[i * num_parallel : (i + 1) * num_parallel]
+            # For naming, we include only the epoch numbers from this chunk (ignoring seed).
+            epochs_in_chunk = [t[1] for t in chunk_tasks]
+            epoch_str = "e" + "-".join(f"{epoch}" for epoch in epochs_in_chunk)
+            job_name = sanitize(f"{base_job_name}{epoch_str}")
             job = {
                 "job_name": job_name,
                 "cfg": cfg,
-                "seed": seed,
                 "subset": subset,
                 "split": split,
                 "dataset": dataset,
                 "model": model,
-                "chunk_epochs": chunk_epochs,
-                "log_dir": log_dir,
+                "chunk_tasks": chunk_tasks,  # list of (seed, epoch) tuples
+                "log_dir": logs_base_dir,
             }
             jobs.append(job)
     return jobs
-
 
 # =============================================================================
 # Part 1: Generate Plain Bash Scripts (Non-slurm)
@@ -243,40 +271,42 @@ def generate_bash_scripts():
     """
     For each job, generate a plain bash script (without any slurm headers)
     that runs the desired commands. Each bash script will run up to num_parallel
-    commands (in parallel) and then call wait.
+    commands (from possibly multiple seeds) in parallel and then call wait.
     """
     jobs = generate_jobs()
     print("Bash scripts generated:")
     for job in jobs:
         job_name = job["job_name"]
         commands = ""
-        for epoch in job["chunk_epochs"]:
+        seed_epoch_strs = [] 
+        for (seed, epoch) in job["chunk_tasks"]:
             commands += get_command(
-                job["cfg"],
-                job["seed"],
-                job["subset"],
-                job["split"],
-                epoch,
-                job["log_dir"],
-                run_dir,
+                cfg=job["cfg"],
+                seed=seed,
+                subset=job["subset"],
+                split=job["split"],
+                epoch=epoch,
+                log_dir=job["log_dir"],
+                run_dir=run_dir,
+                sampling_probs=sampling_probs[job["dataset"]],
             )
-        # Add a wait after launching the background tasks.
+            seed_epoch_strs.append(f"s{seed}e{epoch:03d}")
+        # Ensure all background processes complete
         commands += "wait\n"
-        script_content = "#!/bin/bash\n" + commands
-        bash_script_filename = f"{job_name}.sh"
+        script_content = "#!/bin/bash\n\nSLURM_JOB_ID=$1\n" + commands
+        
+        bash_script_filename = f"{job_name.split('e')[0]}{'-'.join(seed_epoch_strs)}.sh"
         bash_script_path = os.path.join(bash_scripts_dir, bash_script_filename)
         with open(bash_script_path, "w") as f:
             f.write(script_content)
-        # Make the bash script executable.
         os.chmod(bash_script_path, 0o755)
         print(f"bash {bash_script_path}")
-        # Save the path so that the slurm script can call it.
+        # Store the absolute path for slurm scripts to reference.
         job["bash_script_path"] = os.path.abspath(bash_script_path)
     return jobs
 
-
 # =============================================================================
-# Part 2: Generate slurm Scripts that Run the Bash Scripts
+# Part 2: Generate Slurm Scripts that Run the Bash Scripts
 # =============================================================================
 def generate_slurm_scripts(jobs):
     """
@@ -286,8 +316,8 @@ def generate_slurm_scripts(jobs):
     print("Slurm scripts generated:")
     for job in jobs:
         job_name = job["job_name"]
-        # The commands section simply calls the generated bash script.
-        slurm_commands = f"bash {job['bash_script_path']}\nwait\n"
+        # The slurm commands call the corresponding bash script.
+        slurm_commands = f"bash {job['bash_script_path']} $SLURM_JOB_ID \nwait\n"
         slurm_script_content = slurm_template.format(
             job_name=job_name,
             log_dir=job["log_dir"],
@@ -295,23 +325,19 @@ def generate_slurm_scripts(jobs):
             qos_short=qos_short,
             commands=slurm_commands,
         )
-        slurm_script_filename = f"{job_name}.sh"
+        slurm_script_filename = job["bash_script_path"].split("/")[-1]
         slurm_script_path = os.path.join(scripts_output_dir, slurm_script_filename)
         with open(slurm_script_path, "w") as f:
             f.write(slurm_script_content)
         print(f"sbatch {slurm_script_path}")
 
-
 # =============================================================================
 # Main Execution
 # =============================================================================
-import argparse
-import shutil
-import os
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Generate bash scripts and optionally slurm scripts."
+        description="Generate bash scripts and optionally slurm scripts for LRGB experiments."
     )
     parser.add_argument(
         "--slurm",
@@ -325,7 +351,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    # Make relevant dirs
+    # Create/clean necessary directories.
     if args.clean:
         if os.path.exists(bash_scripts_dir):
             print("\nOverwriting existing bash script dir...")

@@ -21,6 +21,7 @@ from lrgb_exps.graphgps.encoder.voc_superpixels_encoder import (
 )
 from lrgb_exps.graphgps.encoder.type_dict_encoder import (
     TypeDictNodeEncoder,
+    DifferentiableTypeDictNodeEncoder,
     TypeDictEdgeEncoder,
 )
 from lrgb_exps.graphgps.encoder.linear_node_encoder import LinearNodeEncoder
@@ -127,6 +128,7 @@ ds_encs = {
     "ASTNode": ASTNodeEncoder,
     "PPANode": PPANodeEncoder,
     "TypeDictNode": TypeDictNodeEncoder,
+    "TypeDictNodeDiff": DifferentiableTypeDictNodeEncoder,
     "VOCNode": VOCNodeEncoder,
     "COCONode": COCONodeEncoder,
     "LinearNode": LinearNodeEncoder,

@@ -9,6 +9,7 @@ from loguru import logger
 from torch.autograd.functional import jacobian
 from torch.func import hessian
 from torch_geometric.utils.sparse import dense_to_sparse
+import time
 
 
 def shuffle(tensor):
@@ -91,8 +92,6 @@ def syn_task_preprocessing(
     data: Data,
     distance_fn: str,
     interaction_fn: str,
-    feature_alpha: float,
-    scalar_feats: bool = True,
     track_range: bool = False,
     graph_level: bool = False,
     use_jacobian: bool = False,
@@ -103,8 +102,6 @@ def syn_task_preprocessing(
         data: PyG graph
         distance_fn: name of distance function, e.g. adjacency, shortest path
         interaction_fn: name of interaction function, e.g. L2
-        feature_alpha: node features will be alpha * data.x + (1-alpha) * uniform random
-        scalar_feats: if True, node features are purely synthetic, 1D
         track_range: if True, compute and store the Jacobian of the task function
         graph_level: indicates if the task is graph_level or not
         use_jacobian: indicates if the final_layer jacobian shoud be computed instead of the hessian in the graph-level case
@@ -123,11 +120,8 @@ def syn_task_preprocessing(
     dist_fn = get_distance_fn(distance_fn)
     interaction_fn = get_interaction_fn(interaction_fn)
 
-    if scalar_feats:  # purely synthetic, 1D node features
-        assert feature_alpha == 0.0, "Scalar features are only supported for alpha=0."
-        data.x = torch.randn(data.num_nodes, 1, requires_grad=True)  # |V| x 1
-    else:  # use a mix of original and synthetic features with original dimensionality
-        data.x = feature_alpha * data.x + (1 - feature_alpha) * torch.rand(data.x.shape)
+    # Purely synthetic, 1D node features
+    data.x = torch.randn(data.num_nodes, 1, requires_grad=True)  # |V| x 1
 
     def gen_node_label(x: Tensor) -> Tensor:
         """Differentiable function generating the labels, so we can compute its Jacobian"""
@@ -204,8 +198,8 @@ def syn_topology_preprocessing(
     Returns:
         Edited PyG Data object with resistance distance and shortest path distances.
     """
-    data = add_distance_attrs(data, "spd")
     data = add_distance_attrs(data, "resistance")
+    data = add_distance_attrs(data, "spd")
 
     return data
 
@@ -220,6 +214,8 @@ def add_distance_attrs(data: Data, distance_fn: str) -> Data:
     Returns:
         Extended PyG Data object.
     """
+    logger.info(f"Computing {distance_fn} distances.")
+    t0 = time.time()
     edge_index_dense = dense_to_sparse(
         torch.ones([data.num_nodes, data.num_nodes]),
     )[0]
@@ -236,4 +232,5 @@ def add_distance_attrs(data: Data, distance_fn: str) -> Data:
         raise ValueError(f"Unknown distance function {distance_fn}")
 
     data.edge_index_dense = edge_index_dense
+    logger.info(f"Computed {distance_fn} distances in {time.time() - t0:.2f}s.")
     return data

@@ -101,6 +101,25 @@ class TypeDictNodeEncoder(torch.nn.Module):
         return batch
 
 
+@register_node_encoder("TypeDictNodeDiff")
+class DifferentiableTypeDictNodeEncoder(torch.nn.Module):
+    """Differentiable version of the DictNodeEncoder that assumes pre-one-hot-encoded features."""
+
+    def __init__(self, emb_dim):
+        super().__init__()
+
+        num_types = cfg.dataset.node_encoder_num_types
+        if num_types < 1:
+            raise ValueError(f"Invalid 'node_encoder_num_types': {num_types}")
+
+        # Features already one-hot encoded
+        self.lin = torch.nn.Linear(num_types, emb_dim)
+
+    def forward(self, batch):
+        batch.x = self.lin(batch.x)
+        return batch
+
+
 @register_edge_encoder("TypeDictEdge")
 class TypeDictEdgeEncoder(torch.nn.Module):
     def __init__(self, emb_dim):

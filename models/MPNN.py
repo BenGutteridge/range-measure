@@ -1,7 +1,8 @@
 import torch
 from torch import Tensor
 from torch_geometric.typing import Adj, OptTensor
-from torch.nn import Module, Dropout, LayerNorm, Identity
+from torch_geometric.nn.pool import global_mean_pool
+from torch.nn import Module, Dropout, LayerNorm, Identity, ModuleList, Linear
 import torch.nn.functional as F
 from typing import Tuple
 import numpy as np
@@ -29,6 +30,8 @@ class MPNN(Module):
         self.dropout = Dropout(p=gnn_args.dropout)
         self.act = gnn_args.act_type.get()
 
+        self.virtual_node = gnn_args.virtual_node
+
         # Encoder types
         self.dataset_encoder = gnn_args.dataset_encoders
         self.bond_encoder = self.dataset_encoder.edge_encoder(
@@ -40,6 +43,13 @@ class MPNN(Module):
 
         # Indicates if the model is run without a head/decoder
         self._headless = False
+
+        if self.virtual_node:
+            self.virt_node_ls = ModuleList()
+            for i in range(self.num_layers):
+                self.virt_node_ls.append(
+                    Linear(gnn_args.hidden_dim, gnn_args.hidden_dim)
+                )
 
     def forward(
         self,
@@ -64,6 +74,7 @@ class MPNN(Module):
             x = self.act(x)
 
         for gnn_idx in range(self.num_layers):  # num layers repeated in net
+
             x = self.hidden_layer_norm(x)
 
             out = self.net[1 + gnn_idx](
@@ -74,6 +85,12 @@ class MPNN(Module):
             out = self.dropout(out)
             out = self.act(out)
 
+            if self.virtual_node:
+                glob = global_mean_pool(x, batch=batch)
+                glob = glob.view(-1, 1, self.gnn_args.hidden_dim)
+                virt_node = self.virt_node_ls[gnn_idx](glob)
+                virt_node = virt_node[batch].squeeze(1)
+                out = out + virt_node
             if self.skip:
                 x = x + out
             else:

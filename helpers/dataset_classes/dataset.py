@@ -10,6 +10,7 @@ import torch_geometric.transforms as T
 from torch_geometric.datasets import HeterophilousGraphDataset
 import json
 import numpy as np
+from loguru import logger
 
 from helpers.dataset_classes.root_neighbours_dataset import RootNeighboursDataset
 from helpers.dataset_classes.cycles_dataset import CyclesDataset
@@ -27,6 +28,8 @@ from models.MPNN import MPNN
 from helpers.encoders import DataSetEncoders, PosEncoder
 from lrgb_synth.cosine_scheduler import cosine_with_warmup_scheduler
 from lrgb_synth.transforms import apply_transform
+from longrange.task_preprocessing import syn_topology_preprocessing
+from lrgb_exps.graphgps.loader.master_loader import VirtualNode
 
 
 class DatasetBySplit(NamedTuple):
@@ -185,15 +188,14 @@ class Dataset(Enum):
             or self is Dataset.lrgb_voc
         )
 
-    def not_synthetic(self) -> bool:
-        return not (
-            self.get_family()
-            in [
-                DataSetFamily.synthetic,
-                DataSetFamily.lr_synthetic,
-                DataSetFamily.lr_synthetic_graph,
-            ]
-        )
+    def is_lr_synthetic(self) -> bool:
+        return self.get_family() in [
+            DataSetFamily.lr_synthetic,
+            DataSetFamily.lr_synthetic_graph,
+        ]
+
+    def is_heterophilic(self) -> bool:
+        return self.get_family() is DataSetFamily.heterophilic
 
     def is_expressivity(self) -> bool:
         return self is Dataset.cycles
@@ -246,7 +248,7 @@ class Dataset(Enum):
             DataSetFamily.heterophilic,
             DataSetFamily.homophilic,
         ]:
-            return list(range(10))
+            return [fold] if fold is not None else list(range(10))
         elif self.get_family() in [
             DataSetFamily.social_networks,
             DataSetFamily.proteins,
@@ -264,13 +266,23 @@ class Dataset(Enum):
         dir_name: Optional[str] = None,
         subset: Optional[int] = None,
         num_graphs: Optional[int] = None,
+        virtual_node: bool = False,
     ) -> List[Data]:
         root = osp.join(ROOT_DIR, "datasets")
         if self.get_family() is DataSetFamily.heterophilic:
             name = self.name.replace("_", "-").capitalize()
+            if dir_name:
+                root = osp.join(root, dir_name)
+            if virtual_node:
+                transform = lambda data: VirtualNode()(T.ToUndirected()(data))
+            else:
+                transform = T.ToUndirected()
             dataset = [
                 HeterophilousGraphDataset(
-                    root=root, name=name, transform=T.ToUndirected()
+                    root=root,
+                    name=name,
+                    transform=transform,
+                    pre_transform=pre_transform,
                 )[0]
             ]
         elif self.get_family() in [
@@ -380,8 +392,15 @@ class Dataset(Enum):
                 num_graphs=num_graphs,
             )
         elif self.get_family() is DataSetFamily.homophilic:
+            if dir_name:
+                root = osp.join(root, dir_name)
             dataset = [
-                Planetoid(root=root, name=self.name, transform=T.NormalizeFeatures())[0]
+                Planetoid(
+                    root=root,
+                    name=self.name,
+                    transform=T.NormalizeFeatures(),
+                    pre_transform=pre_transform,
+                )[0]
             ]
         else:
             raise ValueError(f"Dataset {self.name} not supported in dataloader")
@@ -399,9 +418,6 @@ class Dataset(Enum):
                 train=dataset_copy, val=dataset_copy, test=dataset_copy
             )
         elif self.get_family() is DataSetFamily.synthetic:
-            raise NotImplementedError(
-                "Code below flagged as possibly erroneous, do not use until further review."
-            )
             return DatasetBySplit(train=dataset, val=dataset, test=dataset)
         elif self.get_family() in [
             DataSetFamily.social_networks,
@@ -475,9 +491,6 @@ class Dataset(Enum):
             dataset[0].train_mask[dataset[0].non_valid_samples] = False
             dataset[0].test_mask[dataset[0].non_valid_samples] = False
             dataset[0].val_mask[dataset[0].non_valid_samples] = False
-            raise NotImplementedError(
-                "Code below flagged as possibly erroneous, do not use until further review."
-            )
             return DatasetBySplit(train=dataset, val=dataset, test=dataset)
         else:
             raise ValueError(f"NotImplemented")
@@ -676,9 +689,19 @@ class Dataset(Enum):
 
         # dataset dependant parameters
         assert (
-            self.get_family() in [DataSetFamily.social_networks, DataSetFamily.proteins]
+            self.get_family()
+            in [
+                DataSetFamily.social_networks,
+                DataSetFamily.proteins,
+                DataSetFamily.heterophilic,
+            ]
             or args.fold is None
+            or args.sample_range
         ), "social networks and protein datasets are the only ones to use fold"
+        if args.fold and self.get_family() is DataSetFamily.heterophilic:
+            logger.warning(
+                "Fold should only used for heterophilic datasets when computing ranges."
+            )
         assert (
             self.get_family()
             not in [DataSetFamily.social_networks, DataSetFamily.proteins]

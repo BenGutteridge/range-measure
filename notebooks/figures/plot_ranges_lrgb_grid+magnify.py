@@ -19,26 +19,44 @@ monospace_font = font_manager.FontProperties(family="monospace", size=15)
 
 # ------------------ Load and aggregate data ---------------------
 
-path = "lrgb_exps/results/sota"
+plot_out_dir = "plots/camera_ready"
+os.makedirs(plot_out_dir, exist_ok=True)
+path = "lrgb_exps/results/camera_ready"
 dataset = "vocsuperpixels"
 subset = 500
-seed = 0
+seeds = [0, 1, 2, 3]
 logy = True  # Set log-scale y axis
 
+sampling_kwargs = {
+    "in_node_prob": 1.0,
+    "in_channel_prob": 0.5,
+    "out_node_prob": 0.5,
+    "out_channel_prob": 0.5,
+    "min_nodes": 16,
+    "max_nodes": 256,
+}
 selected_splits = [
     "val",
 ]
+subset = {
+    "vocsuperpixels": 500,
+    "peptides-func": 200,
+    "peptides-struct": 200,
+}[dataset]
 
 models_shortened = {
     "GatedGCN": "GGCN",
     "GCN": "GCN",
     "GPS": "GPS",
     "GINE": "GINE",
+    "Transformer": "GT",
+    "GCN+VN": "GCN+VN",
 }
 
 final_epoch_stats = {
     model: get_final_epoch_stats(os.path.join(path, f"{dataset}-{model}"))
     for model in models_shortened.keys()
+    if os.path.exists(os.path.join(path, f"{dataset}-{model}"))
 }
 
 task_metric = {
@@ -48,12 +66,40 @@ task_metric = {
 }[dataset]
 
 
-aggregated_df = load_and_aggregate_data(
-    path=path,
-    dataset=dataset,
-    subset=subset,
-    seed=seed,
-)
+aggregated_dfs = []
+for seed in seeds:
+    aggregated_dfs.append(
+            load_and_aggregate_data(
+            path=path,
+            dataset=dataset,
+            subset=subset,
+            seed=seed,
+            **sampling_kwargs,
+        )
+    )
+
+# If a single seed, use std over *graphs* for error bars
+aggregated_df = aggregated_dfs[0]
+# Otherwise, drop existing var cols and compute new ones across *seeds* not graphs
+if len(seeds) > 1:
+    range_cols = [col for col in aggregated_dfs[0].columns if col.startswith("range") and not col.endswith("_var")]
+    for i in range(len(aggregated_dfs)):
+        for col in range_cols: 
+            # Overwrite per-graph variance with per-seed variance
+            aggregated_dfs[i][f"{col}_var"] = aggregated_dfs[i][col] ** 2
+    
+    aggregated_df = aggregated_dfs[0]
+    range_var_cols = [f"{col}_var" for col in range_cols]
+    for df in aggregated_dfs[1:]: 
+        aggregated_df[range_cols] += df[range_cols]
+        aggregated_df[range_var_cols] += df[range_var_cols]
+    # Compute the mean and variance across seeds
+    aggregated_df[range_cols] /= len(seeds)
+    aggregated_df[range_var_cols] /= len(seeds)
+    aggregated_df[range_var_cols] -= aggregated_df[range_cols].rename(
+        columns={range: var for range, var in zip(range_cols, range_var_cols)}
+    ) ** 2
+        
 
 # --------------------- Define Plot Params ---------------------
 
@@ -62,8 +108,8 @@ metrics = [
     "range_spd_norm",
 ]
 metrics_formatted = {
-    "range_res_norm": "$\\rho_{\\text{res}}$",
-    "range_spd_norm": "$\\rho_{\\text{spd}}$",
+    "range_res_norm": "$\\hat{\\rho}^{\\text{res}}_{\\mathcal{G}$",
+    "range_spd_norm": "$\\hat{\\rho}^{\\text{spd}}_{\\mathcal{G}$",
 }
 
 variance_metrics = [f"{metric}_var" for metric in metrics]
@@ -73,17 +119,24 @@ titles = [
 ]
 
 models = aggregated_df["model"].unique()
-
-
 split = selected_splits[0]
-scores = {
-    model: (
+scores = {}
+for model, shortened in models_shortened.items():
+    if model not in models:
+        continue
+    scores_over_seeds = [
+        final_epoch_stats[model][seed][split][task_metric.lower()]
+        for seed in seeds
+    ]
+    scores[model] = (
         shortened,
-        final_epoch_stats[model][seed][split][task_metric.lower()],
+        np.mean(scores_over_seeds),
+        np.std(scores_over_seeds),
     )
-    for model, shortened in models_shortened.items()
+
+model_score_map = {
+    model: f"{name:<7} {score:.3f}±{std:.2f}" for model, (name, score, std) in scores.items()
 }
-model_score_map = {m: f"{name:<5} {val:.3f}" for m, (name, val) in scores.items()}
 
 # Filter splits
 if selected_splits:
@@ -129,7 +182,7 @@ metric_subplot_map = {
 }
 
 # Sort models by descending score
-sorted_models = sorted(models, key=lambda m: scores.get(m, ("", 0))[1], reverse=True)
+sorted_models = sorted(models, key=lambda m: scores.get(m, ("", 0))[1], reverse={"MAE": False, "AP": True, "F1": True}[task_metric])
 
 # --------------------- Plot Main Metrics ---------------------
 for metric in metrics:
@@ -221,10 +274,6 @@ if logy:
 ax_zoom.tick_params(axis="x", labelsize=12)
 ax_zoom.tick_params(axis="y", labelsize=12)
 
-# --------------------- REMOVE or COMMENT OUT THE PROBLEMATIC LINE ---------------------
-# The following line was disabling all tick labels on whichever axis was last used by 'ax':
-# ax.tick_params(left=False, right=False, labelleft=False, labelbottom=False, bottom=False)
-
 # --------------------- Custom Legend ---------------------
 legend_elements = []
 
@@ -258,7 +307,8 @@ if len(splits) > 1:
         )
     legend_elements.extend(split_handles)
 
-std_dev_handle = Patch(facecolor="gray", edgecolor="w", alpha=0.2, label="$\sigma$")
+error_bars_label = f"$\\sigma$ (over {len(seeds)} seeds)" if len(seeds) > 1 else f"$\\sigma$ (over {subset} graphs)"
+std_dev_handle = Patch(facecolor="gray", edgecolor="w", alpha=0.2, label=error_bars_label)
 legend_elements.append(std_dev_handle)
 
 axes[3].axis("off")  # bottom-right subplot just for legend
@@ -270,7 +320,7 @@ legend.set_title(f"Model: {task_metric}", prop=monospace_font)
 # --------------------- Finalize and Save ---------------------
 plt.tight_layout(rect=[0, 0, 0.85, 0.95])
 
-filename = f"plots/{dataset}_ranges{f'_subset{subset}' if subset > 0 else ''}_{'-'.join(sorted(models))}_{'-'.join(sorted(splits))}.png"
+filename = f"{plot_out_dir}/{dataset}_ranges{f'_subset{subset}' if subset > 0 else ''}_{'-'.join(sorted(models))}_{'-'.join(sorted(splits))}.png"
 print(f"Saving plot to {filename}")
 plt.savefig(filename, dpi=300, bbox_inches="tight")
 plt.savefig(filename.replace(".png", ".pdf"), bbox_inches="tight")

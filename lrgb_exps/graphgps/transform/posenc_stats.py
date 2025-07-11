@@ -11,9 +11,11 @@ from torch_geometric.utils import (
     to_dense_adj,
     scatter,
 )
+from functools import partial
 from torch_geometric.utils.num_nodes import maybe_num_nodes
 from torch_geometric.data import Data
 from lrgb_exps.graphgps.encoder.graphormer_encoder import graphormer_pre_processing
+from lrgb_exps.graphgps.transform.rrwp import add_full_rrwp
 
 
 def compute_posenc_stats(data, pe_types, is_undirected, cfg):
@@ -49,6 +51,7 @@ def compute_posenc_stats(data, pe_types, is_undirected, cfg):
             "HKfullPE",
             "ElstaticSE",
             "GraphormerBias",
+            "RRWP",
         ]:
             raise ValueError(f"Unexpected PE stats selection {t} in {pe_types}")
 
@@ -178,6 +181,17 @@ def compute_posenc_stats(data, pe_types, is_undirected, cfg):
         data = graphormer_pre_processing(
             data, cfg.posenc_GraphormerBias.num_spatial_types
         )
+    if "RRWP" in pe_types:
+        param = cfg.posenc_RRWP
+        transform = partial(
+            add_full_rrwp,
+            walk_length=param.ksteps,
+            attr_name_abs="rrwp",
+            attr_name_rel="rrwp",
+            add_identity=True,
+            spd=param.spd,  # by default False
+        )
+        data = transform(data)
 
     return data
 

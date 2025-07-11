@@ -62,15 +62,20 @@ class DifferentiableAtomEncoder(nn.Module):
 
         feature_dims = get_atom_feature_dims()
         if minimal_sized_encodings:
-            # About 2/3 of feature channels for Atom encoder are unused, meaning a unnecessarily large input features.
+            # 80+% of feature channels for Atom encoder are unused, meaning a unnecessarily large input features.
             # This setting uses the minumum required.
-            max_feat_dim_vals = [16, 2, 6, 6, 4, 0, 5, 1, 1]
+            max_feat_dim_vals = [5, 2, 4, 2, 4, 0, 4, 1, 1]
         else:
             max_feat_dim_vals = [float("inf")] * 10
         feature_dims = [
             min(feat_dim, max_feat_dim_vals[i] + 1)
             for i, feat_dim in enumerate(feature_dims)
         ]
+
+        feature_dims = [
+            f for f in feature_dims if f > 1
+        ]  # remove features with only 1 value as they contain no information
+
         self.cum_feature_dims = [
             sum(feature_dims[:i]) for i in range(len(feature_dims) + 1)
         ]
@@ -98,3 +103,33 @@ class DifferentiableAtomEncoder(nn.Module):
 
 
 register_node_encoder("AtomDiff", DifferentiableAtomEncoder)
+
+
+class DifferentiableZINCEncoder(nn.Module):
+    """
+    Alternative encoder that takes pre-one-hot encoded float features 
+    and applies a differentiable Linear layer rather than nn.Embedding.\
+    """
+
+    def __init__(self, emb_dim, minimal_sized_encodings=True):
+        super(DifferentiableZINCEncoder, self).__init__()
+
+        self.linear = nn.Linear(cfg.dataset.node_encoder_num_types, emb_dim, bias=False)
+
+    def forward(self, batch):
+        # x: [num_nodes, SUM(feature_dims)] (concatenated one-hot encodings)
+
+        encoded_features = 0
+        for i, (lower_dim, upper_dim) in enumerate(
+            zip(self.cum_feature_dims[:-1], self.cum_feature_dims[1:])
+        ):
+            # Get one-hot encoding of the i-th feature
+            x = batch.x[:, lower_dim:upper_dim]
+
+            encoded_features += self.linear_layers[i](x)  # [num_nodes, emb_dim]
+
+        batch.x = encoded_features
+        return batch
+
+
+register_node_encoder("ZINCDiffEncoder", DifferentiableZINCEncoder)

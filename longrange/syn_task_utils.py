@@ -14,7 +14,8 @@ from torch_geometric.utils import (
 import networkx as nx
 from torch_geometric.data import Data
 from typing import Callable
-import matplotlib.pyplot as plt
+from loguru import logger
+from tqdm import tqdm
 
 
 # --------------------------|
@@ -156,7 +157,7 @@ def inverse_shortest_path(data: Data) -> torch.Tensor:
         torch.Tensor: A tensor representing the inverse of the shortest path distance matrix.
                       Infinite values are replaced with 0.0.
     """
-    graph = to_networkx(data)
+    graph = to_networkx(data, to_undirected=True)
     spd_mat = nx.floyd_warshall_numpy(graph)
     spd_mat = torch.from_numpy(spd_mat)
     inv_spd_mat = torch.pow(spd_mat, -1.0)
@@ -175,7 +176,7 @@ def shortest_path(data: Data) -> torch.Tensor:
         torch.Tensor: A tensor representing the inverse of the shortest path distance matrix.
                       Infinite values are replaced with 0.0.
     """
-    graph = to_networkx(data)
+    graph = to_networkx(data, to_undirected=True)
     spd_mat = nx.floyd_warshall_numpy(graph)
     spd_mat = torch.from_numpy(spd_mat).float()
     spd = torch.nan_to_num(spd_mat, posinf=0.0)
@@ -192,7 +193,7 @@ def inverse_exp_shortest_path(data: Data) -> torch.Tensor:
     Returns:
     - A 2D torch.Tensor of shape (n, n), where the (i, j)-th entry is 1 / exp(spd(i,j)).
     """
-    graph = to_networkx(data)
+    graph = to_networkx(data, to_undirected=True)
     spd_mat = nx.floyd_warshall_numpy(graph)
     spd_mat = torch.from_numpy(spd_mat)
     exp_spd_mat = torch.exp(spd_mat)
@@ -225,7 +226,7 @@ def resistance_distance_disconnected(G: nx.classes.graph.Graph) -> torch.Tensor:
     # Check if the graph is connected
     if nx.is_connected(G):
         res_dist = nx.resistance_distance(G)
-        for i, u in enumerate(G.nodes):
+        for i, u in tqdm(enumerate(G.nodes), total=n):
             for j, v in enumerate(G.nodes):
                 resistance_matrix[nodes.index(u), nodes.index(v)] = res_dist[u][v]
 
