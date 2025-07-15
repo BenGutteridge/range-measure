@@ -31,9 +31,9 @@ All scripts for running the synthetic experiments can be found in [scripts/synth
 
 # LRGB experiments
 The following code block:
-- trains models on LRGB tasks from according to hyperparameters from [1] (additional details explained in paper)
-- generates scripts to compute the range measure across models/tasks/splits/epochs
-- collates the results and plots the figures found in the paper
+- Trains models on LRGB tasks from according to hyperparameters from [1] (additional details explained in paper)
+- Generates scripts to compute the range measure across models/tasks/splits/epochs
+- Collates the results and plots the figures found in the paper
 
 ```
 bash scripts/train_models.sh # can be time consuming; only required once
